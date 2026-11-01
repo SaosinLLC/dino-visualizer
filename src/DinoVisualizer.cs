@@ -19,7 +19,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.1.2.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
 [assembly: System.Reflection.AssemblyTitle("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyProduct("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyCompany("Saosin LLC")]
@@ -4350,6 +4350,48 @@ namespace DinoVisualizer
         [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int MouseScaleFn(ulong handle, ref Vector2 scale);
         [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int FromFileFn(ulong handle, IntPtr path);
         [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int TextureFn(ulong handle, ref Texture texture);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int PathFn(IntPtr path);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int NamedHandleFn(IntPtr name, ref ulong handle);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int UpdateActionsFn([In, Out] ActiveActionSet[] sets, uint size, uint count);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int DigitalFn(ulong action, ref DigitalAction data, uint size, ulong restrictToDevice);
+
+        // VRActiveActionSet_t and InputDigitalActionData_t (SteamVR Input).
+        [StructLayout(LayoutKind.Sequential)]
+        public struct ActiveActionSet { public ulong Set, RestrictedToDevice, Secondary; public uint Padding; public int Priority; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct DigitalAction
+        {
+            [MarshalAs(UnmanagedType.I1)] public bool Active;
+            public ulong Origin;
+            [MarshalAs(UnmanagedType.I1)] public bool State;
+            [MarshalAs(UnmanagedType.I1)] public bool Changed;
+            public float UpdateTime;
+        }
+
+        // SteamVR Input (IVRInput_011): the app's own actions, read alongside the game's. Null if SteamVR has no such
+        // interface (the gestures that use it are then left out).
+        public static PathFn SetActionManifest;
+        public static NamedHandleFn ActionSetHandle, ActionHandle, SourceHandle;
+        public static UpdateActionsFn UpdateActions;
+        public static DigitalFn Digital;
+
+        // A UTF-8 copy of a string for SteamVR (free it with Marshal.FreeHGlobal).
+        public static IntPtr Utf8(string s)
+        {
+            var bytes = System.Text.Encoding.UTF8.GetBytes(s + "\0");
+            IntPtr p = Marshal.AllocHGlobal(bytes.Length);
+            Marshal.Copy(bytes, 0, p, bytes.Length);
+            return p;
+        }
+
+        // A handle by name (an action set, an action or an input source); 0 if SteamVR doesn't know it.
+        public static ulong Handle(NamedHandleFn fn, string name)
+        {
+            IntPtr p = Utf8(name);
+            try { ulong h = 0; return fn(p, ref h) == 0 ? h : 0; }
+            finally { Marshal.FreeHGlobal(p); }
+        }
 
         // Texture_t: a Direct3D 11 texture (type 0) in gamma color space (1), as GDI draws.
         [StructLayout(LayoutKind.Sequential)]
@@ -4462,6 +4504,18 @@ namespace DinoVisualizer
                 SetMouseScale = Fn<MouseScaleFn>(overlay, 52);
                 SetFromFile = Fn<FromFileFn>(overlay, 63);
                 SetTexture = Fn<TextureFn>(overlay, 60);
+                int inputError = 0;
+                IntPtr input = GetGenericInterface("FnTable:IVRInput_011", ref inputError);
+                if (inputError == 0 && input != IntPtr.Zero)
+                {
+                    SetActionManifest = Fn<PathFn>(input, 0);
+                    ActionSetHandle = Fn<NamedHandleFn>(input, 1);
+                    ActionHandle = Fn<NamedHandleFn>(input, 2);
+                    SourceHandle = Fn<NamedHandleFn>(input, 3);
+                    UpdateActions = Fn<UpdateActionsFn>(input, 4);
+                    Digital = Fn<DigitalFn>(input, 5);
+                }
+                else SetActionManifest = null;
                 Running = true;
                 return true;
             }
@@ -4675,8 +4729,9 @@ namespace DinoVisualizer
             OpenVr.SetSortOrder(overlay, 10);
             OpenVr.SetAlpha(overlay, 0);
             Pointable(overlay);
+            SetUpInput();
             alpha = 0;
-            shown = facing = false;
+            shown = facing = moving = resizing = wasFist = false;
             attached = OpenVr.NoDevice;
             card = new NowPlayingWidget(1.2f, look) { LevelSource = LevelSource, Visualizer = visualizer };
             card.Command += slot => { if (Command != null) Command(slot); };
@@ -4787,19 +4842,31 @@ namespace DinoVisualizer
                 nextWindowFrame = DateTime.UtcNow.AddMilliseconds(Math.Max(200, took.Elapsed.TotalMilliseconds * 3));
             }
             uint hand = OpenVr.RoleIndex(place <= 2 ? OpenVr.LeftHand : OpenVr.RightHand);
+            uint other = OpenVr.RoleIndex(place <= 2 ? OpenVr.RightHand : OpenVr.LeftHand);
             if (hand >= OpenVr.MaxDevices || !poses[hand].Valid || !poses[OpenVr.Hmd].Valid) { Fade(false); return; }
-            var mount = Mount(place, OffsetX, OffsetY, OffsetZ, Roll);
-            if (hand != attached)
+            bool otherValid = other < OpenVr.MaxDevices && poses[other].Valid;
+            var wrist = poses[hand].DeviceToAbsolute;
+            var mount = moving ? moveMount : customMount.HasValue ? customMount.Value : Mount(place, OffsetX, OffsetY, OffsetZ, Roll);
+            var world = Multiply(wrist, mount);
+            if (inputReady)
+            {
+                var sets = new[] { new OpenVr.ActiveActionSet { Set = actionSet } };
+                OpenVr.UpdateActions(sets, (uint)Marshal.SizeOf(typeof(OpenVr.ActiveActionSet)), 1);
+                Grabbing(wrist, other, otherValid, ref mount, ref world);
+            }
+            Resizing(other, otherValid);
+            if (hand != attached || mountDirty)
             {
                 OpenVr.SetRelative(overlay, hand, ref mount);
                 attached = hand;
+                mountDirty = false;
             }
-            var world = Multiply(poses[hand].DeviceToAbsolute, mount);
+            lastWorld = world;
             float distance, toward = FacingHead(world, poses[OpenVr.Hmd].DeviceToAbsolute, out distance);
-            // Turned toward the face: within about 40 degrees to show, and it stays until past about 55. Turned toward
-            // it twice within 1.2 seconds opens or closes the app's window.
+            // Turned toward the face: within about 40 degrees to show, and it stays until past about 55 (and while it's
+            // being moved or resized). Turned toward it twice within 1.2 seconds opens or closes the app's window.
             bool was = facing;
-            facing = facing ? toward > 0.57f && distance < 1.0f : toward > 0.77f && distance < 0.85f;
+            facing = moving || resizing || (facing ? toward > 0.57f && distance < 1.0f : toward > 0.77f && distance < 0.85f);
             if (facing && !was)
             {
                 if ((DateTime.UtcNow - lastRaise).TotalSeconds < 1.2) { ToggleWindow(); lastRaise = DateTime.MinValue; }
@@ -4821,7 +4888,8 @@ namespace DinoVisualizer
             uint size = (uint)Marshal.SizeOf(typeof(OpenVr.Event));
             while (OpenVr.PollOverlayEvent(overlay, ref e, size))
             {
-                if (e.Type == OpenVr.FocusLeave) { card.HoverButton = stripHover = -1; continue; }
+                if (e.Type == OpenVr.FocusLeave) { card.HoverButton = stripHover = -1; EndResize(); continue; }
+                if (e.Type == OpenVr.MouseUp) { EndResize(); continue; }
                 if (e.Type != OpenVr.MouseMove && e.Type != OpenVr.MouseDown) continue;
                 float x = OpenVr.First(e), y = texHeight - OpenVr.Second(e);
                 bool click = e.Type == OpenVr.MouseDown && OpenVr.Button(e) == OpenVr.LeftButton && alpha > 0.5f;
@@ -4841,10 +4909,204 @@ namespace DinoVisualizer
                 int button = card.PlayerButtonAt(p);
                 if (e.Type == OpenVr.MouseMove) card.HoverButton = button;
                 else if (click && button >= 0) card.Press(button);
+                else if (click) StartResize();   // the trigger held on the card itself: resizing
             }
             if (window == 0) return;
             while (OpenVr.PollOverlayEvent(window, ref e, size))
                 if (windowOpen) WindowPointing(e);
+        }
+
+        // ---- Moving and resizing the card by hand.
+        //
+        // A fist (the grip) with the other hand near the card picks it up: it follows that hand, and opening the hand
+        // leaves it there, still on the wrist (it moves with the arm from then on, and is remembered). Two fists in a
+        // row on it put it back where it started. Holding the trigger on the card (not on a button) and moving that
+        // hand resizes it: right or up for bigger, left or down for smaller.
+        //
+        // The fist comes from SteamVR Input: the app has one action, "grab", bound by default to the grip (a squeeze on
+        // Index controllers, the grip button on Touch and Vive ones). It can be rebound in SteamVR's controller settings.
+
+        bool inputReady, moving, resizing, wasFist, mountDirty;
+        ulong actionSet, grabAction, leftSource, rightSource;
+        OpenVr.Matrix34? customMount;     // where the card was left on the wrist (null: its usual spot)
+        OpenVr.Matrix34 moveMount, grabOffset, lastWorld;
+        DateTime lastFist;
+        float resizeWidth;
+        float[] resizeFrom, resizeRight, resizeUp;
+
+        const string Actions = @"{
+  ""default_bindings"": [
+    { ""controller_type"": ""knuckles"", ""binding_url"": ""bindings_knuckles.json"" },
+    { ""controller_type"": ""oculus_touch"", ""binding_url"": ""bindings_oculus_touch.json"" },
+    { ""controller_type"": ""vive_controller"", ""binding_url"": ""bindings_vive_controller.json"" }
+  ],
+  ""actions"": [ { ""name"": ""/actions/dino/in/grab"", ""type"": ""boolean"" } ],
+  ""action_sets"": [ { ""name"": ""/actions/dino"", ""usage"": ""leftright"" } ],
+  ""localization"": [ { ""language_tag"": ""en_US"", ""/actions/dino"": ""Dino Visualizer"", ""/actions/dino/in/grab"": ""Grab the wrist card"" } ]
+}";
+
+        // A binding file: the grip on both hands, as a squeeze (Index) or a click (the others).
+        static string Binding(string controller, string mode, string input)
+        {
+            string source = @"{ ""path"": ""/user/hand/HAND/input/grip"", ""mode"": ""MODE"", ""inputs"": { ""INPUT"": { ""output"": ""/actions/dino/in/grab"" } } }"
+                .Replace("MODE", mode).Replace("INPUT", input);
+            return @"{ ""action_manifest_version"": 0, ""controller_type"": """ + controller + @""", ""name"": ""Dino Visualizer"", ""description"": ""Grip grabs the wrist card"",
+  ""bindings"": { ""/actions/dino"": { ""sources"": [ " + source.Replace("HAND", "left") + ", " + source.Replace("HAND", "right") + " ] } } }";
+        }
+
+        void SetUpInput()
+        {
+            inputReady = false;
+            if (OpenVr.SetActionManifest == null) return;
+            try
+            {
+                string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Dino Visualizer", "vr");
+                Directory.CreateDirectory(folder);
+                File.WriteAllText(Path.Combine(folder, "actions.json"), Actions);
+                File.WriteAllText(Path.Combine(folder, "bindings_knuckles.json"), Binding("knuckles", "grab", "grab"));
+                File.WriteAllText(Path.Combine(folder, "bindings_oculus_touch.json"), Binding("oculus_touch", "button", "click"));
+                File.WriteAllText(Path.Combine(folder, "bindings_vive_controller.json"), Binding("vive_controller", "button", "click"));
+                IntPtr path = OpenVr.Utf8(Path.Combine(folder, "actions.json"));
+                try { if (OpenVr.SetActionManifest(path) != 0) return; }
+                finally { Marshal.FreeHGlobal(path); }
+                actionSet = OpenVr.Handle(OpenVr.ActionSetHandle, "/actions/dino");
+                grabAction = OpenVr.Handle(OpenVr.ActionHandle, "/actions/dino/in/grab");
+                leftSource = OpenVr.Handle(OpenVr.SourceHandle, "/user/hand/left");
+                rightSource = OpenVr.Handle(OpenVr.SourceHandle, "/user/hand/right");
+                inputReady = actionSet != 0 && grabAction != 0 && leftSource != 0 && rightSource != 0;
+            }
+            catch { inputReady = false; }
+        }
+
+        bool Fist(ulong hand)
+        {
+            var d = new OpenVr.DigitalAction();
+            return OpenVr.Digital(grabAction, ref d, (uint)Marshal.SizeOf(typeof(OpenVr.DigitalAction)), hand) == 0 && d.Active && d.State;
+        }
+
+        // The other hand's controller tip (7 cm ahead of its middle) close to the card's middle.
+        bool Near(OpenVr.Matrix34 hand, OpenVr.Matrix34 card)
+        {
+            float x = hand.M3 - hand.M2 * 0.07f - card.M3, y = hand.M7 - hand.M6 * 0.07f - card.M7, z = hand.M11 - hand.M10 * 0.07f - card.M11;
+            return Math.Sqrt(x * x + y * y + z * z) < Math.Max(0.15f, width * 0.75f);
+        }
+
+        // The fist: picking the card up, carrying it, leaving it, or (twice quickly) putting it back.
+        void Grabbing(OpenVr.Matrix34 wrist, uint other, bool otherValid, ref OpenVr.Matrix34 mount, ref OpenVr.Matrix34 world)
+        {
+            bool fist = otherValid && Fist(place <= 2 ? rightSource : leftSource);
+            bool down = fist && !wasFist;
+            wasFist = fist;
+            if (down && alpha > 0.3f && Near(poses[other].DeviceToAbsolute, world))
+            {
+                if ((DateTime.UtcNow - lastFist).TotalSeconds < 0.5)
+                {
+                    // The second fist straight after the first: back to its usual spot.
+                    lastFist = DateTime.MinValue;
+                    moving = false;
+                    ResetMount();
+                    mount = Mount(place, OffsetX, OffsetY, OffsetZ, Roll);
+                    world = Multiply(wrist, mount);
+                    if (Adjusted != null) Adjusted();
+                    return;
+                }
+                lastFist = DateTime.UtcNow;
+                moving = true;
+                moveMount = mount;
+                grabOffset = Multiply(Inverse(poses[other].DeviceToAbsolute), world);
+            }
+            if (!moving) return;
+            if (!fist)
+            {
+                // Let go: it stays there on the wrist.
+                moving = false;
+                customMount = moveMount;
+                mountDirty = true;
+                if (Adjusted != null) Adjusted();
+                return;
+            }
+            world = Multiply(poses[other].DeviceToAbsolute, grabOffset);
+            mount = moveMount = Multiply(Inverse(wrist), world);
+            mountDirty = true;
+        }
+
+        void StartResize()
+        {
+            uint other = OpenVr.RoleIndex(place <= 2 ? OpenVr.RightHand : OpenVr.LeftHand);
+            if (other >= OpenVr.MaxDevices || !poses[other].Valid) return;
+            var h = poses[other].DeviceToAbsolute;
+            resizing = true;
+            resizeWidth = width;
+            resizeFrom = new[] { h.M3, h.M7, h.M11 };
+            resizeRight = new[] { lastWorld.M0, lastWorld.M4, lastWorld.M8 };   // the card's right and up, as it was
+            resizeUp = new[] { lastWorld.M1, lastWorld.M5, lastWorld.M9 };
+        }
+
+        // How far the hand has moved right and up along the card since the trigger went down: each 10 cm half as big
+        // again (or two thirds the size the other way).
+        void Resizing(uint other, bool otherValid)
+        {
+            if (!resizing || !otherValid) return;
+            var h = poses[other].DeviceToAbsolute;
+            float dx = h.M3 - resizeFrom[0], dy = h.M7 - resizeFrom[1], dz = h.M11 - resizeFrom[2];
+            float along = dx * resizeRight[0] + dy * resizeRight[1] + dz * resizeRight[2] + dx * resizeUp[0] + dy * resizeUp[1] + dz * resizeUp[2];
+            Width = Math.Max(0.08f, Math.Min(0.4f, resizeWidth * (float)Math.Exp(along * 4)));
+        }
+
+        void EndResize()
+        {
+            if (!resizing) return;
+            resizing = false;
+            if (Adjusted != null) Adjusted();
+        }
+
+        // Back to its usual spot on the wrist (also when a different wrist is picked).
+        public void ResetMount()
+        {
+            customMount = null;
+            mountDirty = true;
+        }
+
+        // Where it was left on the wrist, as 12 numbers ("" for its usual spot), for settings.ini.
+        public string MountText
+        {
+            get
+            {
+                if (!customMount.HasValue) return "";
+                var m = customMount.Value;
+                return string.Join(",", new[] { m.M0, m.M1, m.M2, m.M3, m.M4, m.M5, m.M6, m.M7, m.M8, m.M9, m.M10, m.M11 }
+                    .Select(v => v.ToString("R", CultureInfo.InvariantCulture)).ToArray());
+            }
+            set
+            {
+                ResetMount();
+                var parts = (value ?? "").Split(',');
+                if (parts.Length != 12) return;
+                var v = new float[12];
+                for (int i = 0; i < 12; i++)
+                    if (!float.TryParse(parts[i], NumberStyles.Float, CultureInfo.InvariantCulture, out v[i])) return;
+                customMount = new OpenVr.Matrix34 { M0 = v[0], M1 = v[1], M2 = v[2], M3 = v[3], M4 = v[4], M5 = v[5], M6 = v[6], M7 = v[7], M8 = v[8], M9 = v[9], M10 = v[10], M11 = v[11] };
+            }
+        }
+
+        // The inverse of a pose (a turn and a move): turned back, then moved back.
+        public static OpenVr.Matrix34 Inverse(OpenVr.Matrix34 m)
+        {
+            var r = new OpenVr.Matrix34 { M0 = m.M0, M1 = m.M4, M2 = m.M8, M4 = m.M1, M5 = m.M5, M6 = m.M9, M8 = m.M2, M9 = m.M6, M10 = m.M10 };
+            r.M3 = -(r.M0 * m.M3 + r.M1 * m.M7 + r.M2 * m.M11);
+            r.M7 = -(r.M4 * m.M3 + r.M5 * m.M7 + r.M6 * m.M11);
+            r.M11 = -(r.M8 * m.M3 + r.M9 * m.M7 + r.M10 * m.M11);
+            return r;
+        }
+
+        // A card's pose turned in its own plane (degrees; the same way round as Mount's roll).
+        public static OpenVr.Matrix34 TurnInPlane(OpenVr.Matrix34 m, float degrees)
+        {
+            float c = (float)Math.Cos(degrees * Math.PI / 180), s = (float)Math.Sin(degrees * Math.PI / 180);
+            var r = m;
+            r.M0 = c * m.M0 + s * m.M1; r.M4 = c * m.M4 + s * m.M5; r.M8 = c * m.M8 + s * m.M9;
+            r.M1 = -s * m.M0 + c * m.M1; r.M5 = -s * m.M4 + c * m.M5; r.M9 = -s * m.M8 + c * m.M9;
+            return r;
         }
 
         void Fade(bool show)
@@ -5259,8 +5521,11 @@ namespace DinoVisualizer
             else if (button == CardSmaller || button == CardBigger) Width = Math.Max(0.08f, Math.Min(0.4f, width * (button == CardBigger ? 1.15f : 1 / 1.15f)));
             else
             {
-                Roll = ((Roll + (button == RotateLeft ? 15 : -15)) % 360 + 360) % 360;
-                attached = OpenVr.NoDevice;   // mounted again, turned, on the next frame
+                // Turned in place: where it was left on the wrist, or in its usual spot.
+                float step = button == RotateLeft ? 15 : -15;
+                if (customMount.HasValue) customMount = TurnInPlane(customMount.Value, step);
+                else Roll = ((Roll + step) % 360 + 360) % 360;
+                mountDirty = true;   // mounted again, turned, on the next frame
             }
             if (button != OpenApp && Adjusted != null) Adjusted();
         }
@@ -11191,10 +11456,12 @@ namespace DinoVisualizer
             wrist.Live = page;
             wrist.WindowWidth = (float)Math.Max(0.4, Math.Min(3, Settings.Num("vrwindowsize", 1)));
             wrist.Roll = (float)Settings.Num("vrwristroll", 0);
+            wrist.MountText = Settings.Str("vrwristmount", "");
             wrist.Adjusted += () =>
             {
                 Settings.Set("vrwristsize", Math.Round(wrist.Width, 3));
                 Settings.Set("vrwristroll", wrist.Roll);
+                Settings.Set("vrwristmount", wrist.MountText);   // where it was left by hand ("" for its usual spot)
                 options.Invalidate();   // the VR Wrist Size row
             };
             wrist.WindowResized += size => Settings.Set("vrwindowsize", Math.Round(size, 2));
@@ -11477,7 +11744,14 @@ namespace DinoVisualizer
             options.Rows.Add(new OptionsPanel.Row
             {
                 Label = "VR Wrist:", Choices = VrWrist.Names, Current = () => wrist.Place,
-                Choose = i => { wrist.Place = i; Settings.Set("vrwrist", i); UpdateStatus(); }
+                Choose = i =>
+                {
+                    wrist.Place = i;
+                    wrist.ResetMount();   // a spot left on one wrist doesn't fit another
+                    Settings.Set("vrwrist", i);
+                    Settings.Set("vrwristmount", "");
+                    UpdateStatus();
+                }
             });
             options.Rows.Add(new OptionsPanel.Row
             {

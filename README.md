@@ -297,6 +297,9 @@ How to use it:
   | **Open App** / **Close App** | Opens or closes Dino Visualizer's window in front of you |
   | **Smaller** / **Bigger** | Resizes the card (remembered, and shown in **VR Wrist Size**) |
   | **Rotate L** / **Rotate R** | Turns the card on your wrist, 15° a click (remembered) |
+- **Move it by hand**: make a fist (squeeze the grip) with your other hand near the card and it follows your hand. Open your hand and it stays there, still on your wrist (it moves with your arm from then on, and is remembered). Two quick fists on it put it back in its usual spot. Picking a different wrist in Options does too.
+- **Resize it by hand**: point at the card (not at a button), hold the trigger, and move that hand: right or up makes it bigger, left or down smaller. Let go to keep the size.
+- The fist is a SteamVR Input action called *Grab the wrist card*, set to the grip by default (a squeeze on Index controllers, the grip button on Touch and Vive controllers). It's listed under Dino Visualizer in SteamVR's controller bindings, where it can be changed.
 - **Open the app's window in VR**: turn your wrist toward your face twice within about a second (show it, turn away, show it again).
   - Dino Visualizer's window appears about 80 cm in front of where you're looking, a meter wide, even while it's put away in the tray on the desktop.
   - It's live: the visualizer, lyrics and everything else move, redrawn about 6 times a second.
