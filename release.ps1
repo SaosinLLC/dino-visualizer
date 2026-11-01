@@ -31,8 +31,11 @@ if ($built.ToString(3) -ne $Version) { throw "The exe says version $built, not $
 if ($LASTEXITCODE -ne 0) { throw "Pushing to GitHub failed" }
 
 if ($Notes -eq "") { $Notes = "Dino Visualizer $Version" }
+# The notes go in a file: quotes in them would otherwise be mangled on the way to gh.
+$notesFile = "$PSScriptRoot\_release\notes.md"
+[IO.File]::WriteAllText($notesFile, $Notes, (New-Object Text.UTF8Encoding $false))
 Push-Location $PSScriptRoot   # gh finds the repo from this folder's git remote
-try { & $gh release create "v$Version" $exe --title "Dino Visualizer $Version" --notes $Notes }
+try { & $gh release create "v$Version" $exe --title "Dino Visualizer $Version" --notes-file $notesFile }
 finally { Pop-Location }
 if ($LASTEXITCODE -ne 0) { throw "Making the GitHub release failed" }
 
