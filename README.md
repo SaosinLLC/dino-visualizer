@@ -170,7 +170,7 @@ To set it up:
 There are three options:
 
 - **Song**: `♫ Song — Artist`
-- **Song + Time**: adds `1:23 / 3:45` on a second line.
+- **Song + Time**: adds `1:23/3:45` on a second line.
 - **Song + Progress Bar**: adds `1:23 ━━━●─────── 3:45` on a second line. **Chatbox Bar** picks how the bar looks:
   - *Line* `━━━●───────`
   - *Blocks* `███░░░░░░░`
@@ -203,7 +203,11 @@ There are three options:
 
 How it behaves:
 
-- It uses the same song as the window. It cleans up YouTube titles, so a title like "Saosin - Voices (Official Video)" becomes `Voices — Saosin`.
+- It uses the same song as the window, with the text kept short so as much as possible fits in VRChat's 144 characters:
+  - YouTube titles are cleaned up: "Saosin - Voices (Official Video) | Epitaph Records #metal" becomes `Voices — Saosin`. Hashtags, `【tags】` and anything after ` | ` (usually the channel or label) go.
+  - Featured artists move after the artist: "Unanswered (feat. Phil Bozeman)" by Suicide Silence becomes `Unanswered — Suicide Silence ft. Phil Bozeman`.
+  - A short ending after a dash goes in brackets: `Die For You (Remix)`.
+  - When it's too long, the song name is shortened first (at the end of a word, with `…`), so the artist still shows.
 - When you pause or stop, the bubble clears (or shows just your status, if it's on). It also clears when you turn everything off or quit the app.
 - VRChat drops chatbox messages that come too fast, so the app sends at most one every 2 seconds. That means the time moves in 2-second steps.
 - The bubble fades after a while, so the text is sent again every 10 seconds.

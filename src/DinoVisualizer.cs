@@ -19,7 +19,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.0.2.0")]
+[assembly: System.Reflection.AssemblyVersion("1.0.3.0")]
 [assembly: System.Reflection.AssemblyTitle("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyProduct("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyCompany("Saosin LLC")]
@@ -6883,14 +6883,17 @@ namespace DinoVisualizer
             return status + "\n" + body;
         }
 
-        // "♫ Song — Artist", then the lyric line, then the time or a progress bar:  1:23 ━━━━●────── 3:45
+        // "♫ Song — Artist ft. Guest", then the lyric line, then the time or a progress bar:  1:23 ━━━━●────── 3:45
         // words is the text without the time line; next is how soon the next lyric line starts (zero: none coming).
         static string Text(NowPlayingInfo info, int mode, int max, out string words, out TimeSpan next)
         {
-            string t, a;
+            string t, a, feat, feat2;
             Lyrics.Clean(info.Title, info.Artist, info.App, out t, out a);
-            if (t == "") t = info.Title.Trim();
-            string song = "♫ " + (a != "" ? t + " — " + a : t);
+            t = Tidy(t, out feat);
+            if (t == "") t = Tidy(info.Title, out feat);
+            a = Regex.Replace(Tidy(a, out feat2), @"\s+(feat\.?|featuring)\s+", " ft. ", RegexOptions.IgnoreCase);
+            if (feat == "") feat = feat2;
+            if (feat != "" && a.IndexOf(feat, StringComparison.OrdinalIgnoreCase) < 0) a = a == "" ? "ft. " + feat : a + " ft. " + feat;
             int clock = mode >= 4 ? mode - 3 : mode;   // 1 no time, 2 time, 3 progress bar
             next = TimeSpan.Zero;
             string lyric = mode >= 4 ? LyricAt(info, out next) : "";
@@ -6898,22 +6901,57 @@ namespace DinoVisualizer
             if (clock >= 2 && info.Duration > TimeSpan.Zero)
             {
                 var now = info.Now;
-                if (clock == 2) time = Clock(now) + " / " + Clock(info.Duration);
+                if (clock == 2) time = Clock(now) + "/" + Clock(info.Duration);
                 else time = Clock(now) + " " + BarText(now.TotalSeconds / info.Duration.TotalSeconds, Bar) + " " + Clock(info.Duration);
             }
             // Over the limit, a long song name gives way to the lyric line (down to 40 characters), then the lyric (left
             // out if there's hardly room for it).
             int room = max - (time != "" ? time.Length + 1 : 0);
-            song = Cut(song, Math.Max(Math.Min(40, room), room - (lyric != "" ? lyric.Length + 1 : 0)));
+            string song = SongLine(t, a, Math.Max(Math.Min(40, room), room - (lyric != "" ? lyric.Length + 1 : 0)));
             int left = room - song.Length - 1;
             words = lyric != "" && left >= 8 ? song + "\n" + Cut(lyric, left) : song;
             return time != "" ? words + "\n" + time : words;
         }
 
+        // Shortened to fit, at the end of a word when there's one in the last third (else mid-word), with "…".
         static string Cut(string s, int length)
         {
             if (s.Length <= length) return s;
-            return length <= 1 ? "" : s.Substring(0, length - 1).TrimEnd() + "…";
+            if (length <= 1) return "";
+            int space = s.LastIndexOf(' ', length - 1);
+            int end = space >= length * 2 / 3 ? space : length - 1;
+            return s.Substring(0, end).TrimEnd(' ', ',', '-', '—', '(', '[') + "…";
+        }
+
+        // The words that matter in a title or an artist, as briefly as they read clearly. Out goes what YouTube
+        // titles carry along: hashtags, 【tags】 and anything after " | " (a channel or label). A featured artist,
+        // "(feat. Guest)" or "ft. Guest" at the end, is taken out and handed back to go after the artist.
+        static string Tidy(string s, out string feat)
+        {
+            feat = "";
+            s = s ?? "";
+            var m = Regex.Match(s, @"\s*[\(\[]\s*(?:feat\.?|ft\.?|featuring|with)\s+([^\)\]]+)[\)\]]", RegexOptions.IgnoreCase);
+            if (!m.Success) m = Regex.Match(s, @"\s+(?:feat\.?|ft\.?|featuring)\s+(.+)$", RegexOptions.IgnoreCase);
+            if (m.Success)
+            {
+                feat = m.Groups[1].Value.Trim();
+                s = s.Remove(m.Index, m.Length);
+            }
+            s = Regex.Replace(s, @"【[^】]*】|#\w+", " ");
+            int bar = s.IndexOf(" | ");
+            if (bar > 0) s = s.Substring(0, bar);
+            s = Regex.Replace(s, @"\s{2,}", " ").Trim(' ', '-', '–', '—', '|', ',');
+            // A short ending after a dash ("Song - Remix") goes in brackets, so it doesn't read as the artist's dash.
+            return Regex.Replace(s, @"^(.+?)\s+[-–]\s+([^-–]{1,24})$", "$1 ($2)");
+        }
+
+        // "♫ Song — Artist" in a set length: a long song name is shortened first, keeping the artist (unless that
+        // would leave the name less than half the room).
+        static string SongLine(string t, string a, int length)
+        {
+            string full = "♫ " + (a != "" ? t + " — " + a : t);
+            if (full.Length <= length || a == "") return Cut(full, length);
+            return Cut("♫ " + Cut(t, Math.Max(length / 2, length - 5 - a.Length)) + " — " + a, length);
         }
 
         // The bar for how far through the song (0..1), in one of the BarNames looks. With a knob it's one cell longer.
@@ -6940,7 +6978,7 @@ namespace DinoVisualizer
             for (int i = 0; i < r.Lines.Count && r.Lines[i].Time <= now; i++) current = i;
             if (current + 1 < r.Lines.Count) next = r.Lines[current + 1].Time - now;
             if (current < 0) return "";
-            string s = Adlib(r.Lines[current].Text.Trim(), Adlibs);
+            string s = Regex.Replace(Adlib(r.Lines[current].Text.Trim(), Adlibs), @"\s{2,}", " ").TrimEnd(',', ';', ' ');
             return s == "" ? "♪" : s;
         }
 
