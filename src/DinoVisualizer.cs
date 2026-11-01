@@ -19,7 +19,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.1.1.0")]
+[assembly: System.Reflection.AssemblyVersion("1.1.2.0")]
 [assembly: System.Reflection.AssemblyTitle("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyProduct("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyCompany("Saosin LLC")]
@@ -4564,7 +4564,26 @@ namespace DinoVisualizer
         public event Action Changed;        // connected to SteamVR or not
         public Func<float> LevelSource;
         public Form App;                    // the main window, shown floating in VR on the double turn
-        public float Width = 0.17f, OffsetX, OffsetY, OffsetZ;   // meters (settings.ini: vrwristsize, vrwristx/y/z)
+        public float OffsetX, OffsetY, OffsetZ;   // meters, a nudge from its usual spot (settings.ini: vrwristx/y/z)
+        public float Roll;                        // degrees the card's turned on the wrist (its Rotate buttons)
+        public event Action Adjusted;             // its size or turn was changed from its buttons (save them)
+        public static readonly string[] Sizes = { "Small", "Medium", "Large" };
+        static readonly float[] SizeWidths = { 0.13f, 0.17f, 0.22f };
+        float width = 0.17f;
+
+        // How wide the card is, in meters (it changes straight away).
+        public float Width
+        {
+            get { return width; }
+            set { width = value; if (overlay != 0) OpenVr.SetWidth(overlay, width); }
+        }
+
+        // Small, Medium or Large: the one nearest the width.
+        public int SizeIndex
+        {
+            get { int best = 0; for (int i = 1; i < SizeWidths.Length; i++) if (Math.Abs(SizeWidths[i] - width) < Math.Abs(SizeWidths[best] - width)) best = i; return best; }
+            set { Width = SizeWidths[Math.Max(0, Math.Min(SizeWidths.Length - 1, value))]; }
+        }
 
         readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 22 };
         readonly OpenVr.Pose[] poses = new OpenVr.Pose[OpenVr.MaxDevices];
@@ -4720,17 +4739,19 @@ namespace DinoVisualizer
         //
         // The card's top points the way the controller's bottom does (-Y): that's what reads right way up when the wrist
         // is turned toward your face, on either side of it (tried in VR on both).
-        public static OpenVr.Matrix34 Mount(int place, float dx, float dy, float dz)
+        // roll turns the card round in its own plane on the wrist (degrees, from its Rotate buttons).
+        public static OpenVr.Matrix34 Mount(int place, float dx, float dy, float dz, float roll = 0)
         {
             // Facing +X: the inside of the left wrist or the outside of the right one; facing -X: the other two.
             bool plusX = place == 1 || place == 4;
             float s = plusX ? 1 : -1;
-            // Columns: the card's right (along the arm), its up (-Y) and its face (±X).
+            float c = (float)Math.Cos(roll * Math.PI / 180), n = (float)Math.Sin(roll * Math.PI / 180);
+            // Columns: the card's right (along the arm, +sZ), its up (-Y), both turned by roll, and its face (±X).
             return new OpenVr.Matrix34
             {
                 M0 = 0, M1 = 0, M2 = s, M3 = s * 0.05f + dx,
-                M4 = 0, M5 = -1, M6 = 0, M7 = -0.01f + dy,
-                M8 = s, M9 = 0, M10 = 0, M11 = 0.19f + dz
+                M4 = -n, M5 = -c, M6 = 0, M7 = -0.01f + dy,
+                M8 = c * s, M9 = -n * s, M10 = 0, M11 = 0.19f + dz
             };
         }
 
@@ -4759,12 +4780,6 @@ namespace DinoVisualizer
         {
             OpenVr.GetPoses(OpenVr.Standing, 0.02f, poses, OpenVr.MaxDevices);
             Pointing();
-            if (pressPending && DateTime.UtcNow - pressAt >= HoldToGrab)
-            {
-                pressPending = false;
-                StartGrab(Move, pressTex.X, pressTex.Y);   // held still on the window: grabbed
-            }
-            StepGrab();
             if (windowOpen && DateTime.UtcNow >= nextWindowFrame)
             {
                 var took = Stopwatch.StartNew();
@@ -4773,7 +4788,7 @@ namespace DinoVisualizer
             }
             uint hand = OpenVr.RoleIndex(place <= 2 ? OpenVr.LeftHand : OpenVr.RightHand);
             if (hand >= OpenVr.MaxDevices || !poses[hand].Valid || !poses[OpenVr.Hmd].Valid) { Fade(false); return; }
-            var mount = Mount(place, OffsetX, OffsetY, OffsetZ);
+            var mount = Mount(place, OffsetX, OffsetY, OffsetZ, Roll);
             if (hand != attached)
             {
                 OpenVr.SetRelative(overlay, hand, ref mount);
@@ -4806,12 +4821,26 @@ namespace DinoVisualizer
             uint size = (uint)Marshal.SizeOf(typeof(OpenVr.Event));
             while (OpenVr.PollOverlayEvent(overlay, ref e, size))
             {
+                if (e.Type == OpenVr.FocusLeave) { card.HoverButton = stripHover = -1; continue; }
                 if (e.Type != OpenVr.MouseMove && e.Type != OpenVr.MouseDown) continue;
+                float x = OpenVr.First(e), y = texHeight - OpenVr.Second(e);
+                bool click = e.Type == OpenVr.MouseDown && OpenVr.Button(e) == OpenVr.LeftButton && alpha > 0.5f;
+                if (y >= cardTexHeight)
+                {
+                    // The strip under the card.
+                    var buttons = StripButtons(texWidth, cardTexHeight, texHeight - cardTexHeight);
+                    int at = Array.FindIndex(buttons, r => r.Contains((int)x, (int)y));
+                    card.HoverButton = -1;
+                    stripHover = at;
+                    if (click && at >= 0) StripButton(at);
+                    continue;
+                }
+                stripHover = -1;
                 var area = card.CardArea;
-                var p = new Point(area.X + (int)(OpenVr.First(e) / texScale), area.Y + (int)((texHeight - OpenVr.Second(e)) / texScale));
+                var p = new Point(area.X + (int)(x / texScale), area.Y + (int)(y / texScale));
                 int button = card.PlayerButtonAt(p);
                 if (e.Type == OpenVr.MouseMove) card.HoverButton = button;
-                else if (OpenVr.Button(e) == OpenVr.LeftButton && button >= 0 && alpha > 0.5f) card.Press(button);
+                else if (click && button >= 0) card.Press(button);
             }
             if (window == 0) return;
             while (OpenVr.PollOverlayEvent(window, ref e, size))
@@ -4825,7 +4854,7 @@ namespace DinoVisualizer
             alpha = show ? Math.Min(1, alpha + 0.12f) : Math.Max(0, alpha - 0.08f);
             OpenVr.SetAlpha(overlay, alpha);
             if (alpha > 0 && !shown) { Upload(); OpenVr.ShowOverlay(overlay); shown = true; }
-            else if (alpha <= 0 && shown) { OpenVr.HideOverlay(overlay); shown = false; card.HoverButton = -1; }
+            else if (alpha <= 0 && shown) { OpenVr.HideOverlay(overlay); shown = false; card.HoverButton = stripHover = -1; }
         }
 
         float texScale = 1;   // card texture pixels per card pixel
@@ -4837,7 +4866,8 @@ namespace DinoVisualizer
         void Upload()
         {
             int w = texWidth, h = texHeight;
-            var bgra = Picture(card, clock.Elapsed.TotalSeconds, Gpu.Ready ? int.MaxValue : OpenVr.RawLimit, out texWidth, out texHeight, out texScale);
+            var bgra = Picture(card, clock.Elapsed.TotalSeconds, Gpu.Ready ? int.MaxValue : OpenVr.RawLimit, stripHover, windowOpen,
+                               out texWidth, out texHeight, out cardTexHeight, out texScale);
             var pin = GCHandle.Alloc(bgra, GCHandleType.Pinned);
             bool sent;
             try { sent = ToGpu(overlay, ref cardTexture, ref cardTexW, ref cardTexH, pin.AddrOfPinnedObject(), texWidth * 4, texWidth, texHeight); }
@@ -4911,17 +4941,16 @@ namespace DinoVisualizer
         }
 
         // ---- The app's window floating in VR: about 80 cm in front of where you were looking when it opened, level
-        // and facing you. It's redrawn several times a second while it's open. Round it is a frame: a bar on top with a
-        // close button, and handles. With the trigger held, the bar and the bottom edge carry it wherever the hand
-        // goes, the sides turn it round, and the corners make it bigger or smaller. In the window itself the laser's
-        // moves, trigger and thumbstick scrolling go to the control under it as mouse messages, so everything works
-        // (sliders drag, lists open and scroll); holding the trigger still on it for a moment grabs the window there too.
+        // and facing you. It's redrawn several times a second while it's open. On top is a bar of buttons, all simply
+        // clicked with the laser: Bring Here (in front of where you're looking now), smaller and bigger, turn left and
+        // right, and close. In the window itself the laser's moves, trigger and thumbstick scrolling go to the control
+        // under it as mouse messages, so everything works (sliders drag, lists open and scroll).
 
-        public float WindowWidth = 1.0f;     // meters (settings.ini: vrwindowsize, kept when it's resized)
+        public float WindowWidth = 1.0f;     // meters (kept in settings.ini as vrwindowsize when it's resized)
         public event Action<float> WindowResized;
-        const int Bar = 56, Edge = 28, Corner = 64, MaxWindowWidth = 1600;
-        const int Content = 0, Move = 1, Turn = 2, Resize = 3, Close = 4;
-        static readonly TimeSpan HoldToGrab = TimeSpan.FromSeconds(0.45);
+        const int Bar = 64, MaxWindowWidth = 1600;
+        static readonly string[] BarLabels = { "Bring Here", "Smaller", "Bigger", "Turn Left", "Turn Right", "✕" };
+        const int BringHere = 0, Smaller = 1, Bigger = 2, TurnLeft = 3, TurnRight = 4, CloseWindow = 5;
         bool windowOpen;
         DateTime nextWindowFrame;
         int windowTexWidth = 1, windowTexHeight = 1;
@@ -4929,14 +4958,6 @@ namespace DinoVisualizer
         Control mouseOn;         // the control the laser's over (or holding, while the trigger's down)
         bool mouseHeld;
         OpenVr.Matrix34 windowAt;   // where the window is in the room
-        int grab;                   // what the held trigger is doing to the window (Move, Turn, Resize), 0 nothing
-        uint grabHand;              // the controller doing it
-        OpenVr.Matrix34 grabHandAt, grabWindowAt;   // both as they were when the grab began
-        float grabWidth, grabReach;
-        bool pressPending;          // the trigger's down on the window: a click, a drag or a grab, soon to be seen
-        DateTime pressAt;
-        PointF pressTex;
-        Point pressPoint;
 
         public bool WindowOpen { get { return windowOpen; } }
 
@@ -4944,8 +4965,6 @@ namespace DinoVisualizer
         {
             if (window == 0 || App == null) return;
             windowOpen = !windowOpen;
-            grab = 0;
-            pressPending = false;
             if (!windowOpen)
             {
                 ReleaseWindowMouse();
@@ -4954,6 +4973,15 @@ namespace DinoVisualizer
                 return;
             }
             nextFullDraw = DateTime.MinValue;
+            PlaceInFront();
+            OpenVr.SetWidth(window, WindowWidth);
+            UploadWindow();
+            OpenVr.ShowOverlay(window);
+        }
+
+        // About 80 cm in front of where you're looking, level and facing you.
+        void PlaceInFront()
+        {
             var head = poses[OpenVr.Hmd].DeviceToAbsolute;
             float fx = -head.M2, fz = -head.M10, len = (float)Math.Sqrt(fx * fx + fz * fz);   // where you're looking, level
             if (len < 1e-3f) { fx = 0; fz = -1; len = 1; }
@@ -4968,108 +4996,40 @@ namespace DinoVisualizer
                 M8 = -zx, M9 = 0, M10 = zz, M11 = head.M11 + fz * 0.8f
             };
             OpenVr.SetAbsolute(window, OpenVr.Standing, ref windowAt);
-            OpenVr.SetWidth(window, WindowWidth);
-            UploadWindow();
-            OpenVr.ShowOverlay(window);
         }
 
-        // Which part of the frame a spot on the window's picture is in (y from the top).
-        int ZoneAt(float x, float y)
+        // The bar's buttons, from the right-hand end: close, then turn, size, and Bring Here.
+        static Rectangle[] BarButtons(int width)
         {
-            int w = windowTexWidth, h = windowTexHeight;
-            bool left = x < Corner, right = x > w - Corner, top = y < Corner, bottom = y > h - Corner;
-            if ((left || right) && (top || bottom)) return Resize;
-            if (y < Bar && x >= CloseX(w) && x < CloseX(w) + Bar) return Close;
-            if (y < Bar || y > h - Edge) return Move;
-            if (x < Edge || x > w - Edge) return Turn;
-            return Content;
-        }
-
-        static int CloseX(int width) { return width - Corner - Bar - 6; }
-
-        // Where a controller's laser meets the window, in meters across and up from its middle; false if it doesn't.
-        static bool Hit(OpenVr.Matrix34 at, OpenVr.Matrix34 hand, out float x, out float y)
-        {
-            x = y = 0;
-            float dx = -hand.M2, dy = -hand.M6, dz = -hand.M10;             // the way it points
-            float denom = dx * at.M2 + dy * at.M6 + dz * at.M10;
-            if (Math.Abs(denom) < 1e-4f) return false;
-            float t = ((at.M3 - hand.M3) * at.M2 + (at.M7 - hand.M7) * at.M6 + (at.M11 - hand.M11) * at.M10) / denom;
-            if (t < 0) return false;
-            float rx = hand.M3 + dx * t - at.M3, ry = hand.M7 + dy * t - at.M7, rz = hand.M11 + dz * t - at.M11;
-            x = rx * at.M0 + ry * at.M4 + rz * at.M8;
-            y = rx * at.M1 + ry * at.M5 + rz * at.M9;
-            return true;
-        }
-
-        // The controller whose laser meets the window nearest a spot on its picture (NoDevice if neither does).
-        uint HandAt(float texX, float texY)
-        {
-            uint best = OpenVr.NoDevice;
-            float bestDistance = float.MaxValue, height = WindowWidth * windowTexHeight / windowTexWidth;
-            foreach (int role in new[] { OpenVr.LeftHand, OpenVr.RightHand })
+            var r = new Rectangle[BarLabels.Length];
+            int x = width - 8, size = Bar - 16;
+            for (int i = BarLabels.Length - 1; i >= 0; i--)
             {
-                uint hand = OpenVr.RoleIndex(role);
-                float x, y;
-                if (hand >= OpenVr.MaxDevices || !poses[hand].Valid || !Hit(windowAt, poses[hand].DeviceToAbsolute, out x, out y)) continue;
-                float px = (x / WindowWidth + 0.5f) * windowTexWidth, py = (0.5f - y / height) * windowTexHeight;
-                float d = (px - texX) * (px - texX) + (py - texY) * (py - texY);
-                if (d < bestDistance) { bestDistance = d; best = hand; }
+                int w = i == CloseWindow ? size : i == BringHere ? 190 : 150;
+                x -= w;
+                r[i] = new Rectangle(x, 8, w, size);
+                x -= i == CloseWindow || i == TurnLeft || i == Smaller ? 24 : 8;   // gaps between the groups
             }
-            return best;
-        }
-
-        void StartGrab(int kind, float texX, float texY)
-        {
-            uint hand = HandAt(texX, texY);
-            if (hand == OpenVr.NoDevice) return;
-            ReleaseWindowMouse();
-            grab = kind;
-            grabHand = hand;
-            grabHandAt = poses[hand].DeviceToAbsolute;
-            grabWindowAt = windowAt;
-            grabWidth = WindowWidth;
-            float x, y;
-            grabReach = Hit(windowAt, grabHandAt, out x, out y) ? Math.Max(0.05f, (float)Math.Sqrt(x * x + y * y)) : 0.5f;
-        }
-
-        void EndGrab()
-        {
-            if (grab == Resize && WindowResized != null) WindowResized(WindowWidth);
-            grab = 0;
-        }
-
-        // Each frame of a grab: carried with the hand (moving and tilting with it), turned round its middle as the hand
-        // swings left or right, or sized by how far from its middle the laser now meets it.
-        void StepGrab()
-        {
-            if (grab == 0 || !poses[grabHand].Valid) return;
-            var hand = poses[grabHand].DeviceToAbsolute;
-            if (grab == Move) windowAt = Multiply(hand, Multiply(Inverse(grabHandAt), grabWindowAt));
-            else if (grab == Turn) windowAt = TurnAbout(grabWindowAt, Yaw(hand) - Yaw(grabHandAt));
-            else
-            {
-                float x, y;
-                if (!Hit(windowAt, hand, out x, out y)) return;
-                WindowWidth = Math.Max(0.4f, Math.Min(3f, grabWidth * (float)Math.Sqrt(x * x + y * y) / grabReach));
-                OpenVr.SetWidth(window, WindowWidth);
-                return;
-            }
-            OpenVr.SetAbsolute(window, OpenVr.Standing, ref windowAt);
-        }
-
-        // The inverse of a pose (a turn and a move): turned back, then moved back.
-        public static OpenVr.Matrix34 Inverse(OpenVr.Matrix34 m)
-        {
-            var r = new OpenVr.Matrix34 { M0 = m.M0, M1 = m.M4, M2 = m.M8, M4 = m.M1, M5 = m.M5, M6 = m.M9, M8 = m.M2, M9 = m.M6, M10 = m.M10 };
-            r.M3 = -(r.M0 * m.M3 + r.M1 * m.M7 + r.M2 * m.M11);
-            r.M7 = -(r.M4 * m.M3 + r.M5 * m.M7 + r.M6 * m.M11);
-            r.M11 = -(r.M8 * m.M3 + r.M9 * m.M7 + r.M10 * m.M11);
             return r;
         }
 
-        // Which way a controller points, round the vertical (radians).
-        public static float Yaw(OpenVr.Matrix34 m) { return (float)Math.Atan2(-m.M2, -m.M10); }
+        // A button on the bar was clicked.
+        void BarButton(int button)
+        {
+            if (button == CloseWindow) { ToggleWindow(); return; }
+            if (button == BringHere) PlaceInFront();
+            else if (button == TurnLeft || button == TurnRight)
+            {
+                windowAt = TurnAbout(windowAt, (float)(button == TurnLeft ? 1 : -1) * 15 * (float)Math.PI / 180);   // 15 degrees a click
+                OpenVr.SetAbsolute(window, OpenVr.Standing, ref windowAt);
+            }
+            else
+            {
+                WindowWidth = Math.Max(0.4f, Math.Min(3f, WindowWidth * (button == Bigger ? 1.15f : 1 / 1.15f)));
+                OpenVr.SetWidth(window, WindowWidth);
+                if (WindowResized != null) WindowResized(WindowWidth);
+            }
+        }
 
         // A pose turned round the vertical through its own middle.
         public static OpenVr.Matrix34 TurnAbout(OpenVr.Matrix34 m, float angle)
@@ -5120,8 +5080,7 @@ namespace DinoVisualizer
             var size = App.ClientSize;
             if (size.Width < 200 || size.Height < 150) return false;
             windowScale = Math.Min(1f, MaxWindowWidth / (float)size.Width);
-            int cw = (int)(size.Width * windowScale), ch = (int)(size.Height * windowScale);   // the window, under the bar
-            int w = cw + 2 * Edge, h = ch + Bar + Edge;                                           // with the frame round it
+            int w = (int)(size.Width * windowScale), ch = (int)(size.Height * windowScale), h = ch + Bar;   // the window under the bar
             if (windowCanvas == null || windowCanvas.Size != size)
             {
                 if (windowCanvas != null) windowCanvas.Dispose();
@@ -5148,47 +5107,28 @@ namespace DinoVisualizer
             {
                 g.InterpolationMode = windowScale < 1 ? InterpolationMode.Bilinear : InterpolationMode.NearestNeighbor;
                 g.PixelOffsetMode = PixelOffsetMode.Half;
-                g.DrawImage(windowCanvas, new Rectangle(Edge, Bar, cw, ch));
-                if (full) DrawFrame(g, w, h);
+                g.DrawImage(windowCanvas, new Rectangle(0, Bar, w, ch));
+                if (full) DrawBar(g, w);
             }
             return true;
         }
 
-        // The frame round the window: the bar on top (the name, what the handles do, and a close button), the sides and
-        // bottom edge, and the handles: corner brackets (resize), grips on the sides (turn) and on the bottom (move).
-        static void DrawFrame(Graphics g, int w, int h)
+        // The bar above the window: the name, and its buttons (big, plain and labelled, for clicking with the laser).
+        static void DrawBar(Graphics g, int w)
         {
-            using (var b = new SolidBrush(Theme.Ink))
-            {
-                g.FillRectangle(b, 0, 0, w, Bar);
-                g.FillRectangle(b, 0, Bar, Edge, h - Bar);
-                g.FillRectangle(b, w - Edge, Bar, Edge, h - Bar);
-                g.FillRectangle(b, 0, h - Edge, w, Edge);
-            }
-            using (var b = new SolidBrush(Theme.Faint)) g.FillRectangle(b, Edge - 2, Bar - 2, w - 2 * Edge + 4, 2);
-            int closeX = CloseX(w);
-            TextRenderer.DrawText(g, "Dino Visualizer   ·   hold the trigger: here or in the middle moves it, the sides turn it, the corners resize it", Theme.Header,
-                new Rectangle(Corner, 0, closeX - Corner - 12, Bar - 3), Theme.Primary, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
-            var close = new Rectangle(closeX, 8, Bar, Bar - 16);
-            using (var b = new SolidBrush(Theme.Primary)) g.FillRectangle(b, close);
-            TextRenderer.DrawText(g, "✕", Theme.Header, close, Theme.Ink, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-            using (var p = new Pen(Theme.Primary, 3)) g.DrawRectangle(p, 1, 1, w - 3, h - 3);
-            using (var b = new SolidBrush(Theme.Bright))
-            {
-                // Corners: thick brackets.
-                int t = 8, len = Corner - 6;
-                foreach (var c in new[] { new Point(0, 0), new Point(w, 0), new Point(0, h), new Point(w, h) })
+            using (var b = new SolidBrush(Theme.Ink)) g.FillRectangle(b, 0, 0, w, Bar);
+            using (var b = new SolidBrush(Theme.Primary)) g.FillRectangle(b, 0, Bar - 3, w, 3);
+            var buttons = BarButtons(w);
+            TextRenderer.DrawText(g, "Dino Visualizer", Theme.Header, new Rectangle(18, 0, Math.Max(0, buttons[BringHere].X - 30), Bar - 3), Theme.Primary,
+                TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+            using (var font = new Font(Theme.Header.FontFamily, Theme.Header.Size * 1.2f, FontStyle.Bold))
+                for (int i = 0; i < buttons.Length; i++)
                 {
-                    g.FillRectangle(b, c.X == 0 ? 0 : w - len, c.Y == 0 ? 0 : h - t, len, t);
-                    g.FillRectangle(b, c.X == 0 ? 0 : w - t, c.Y == 0 ? 0 : h - len, t, len);
+                    using (var b = new SolidBrush(i == CloseWindow ? Theme.Primary : Theme.Faint)) g.FillRectangle(b, buttons[i]);
+                    using (var p = new Pen(Theme.Bright, 2)) g.DrawRectangle(p, buttons[i]);
+                    TextRenderer.DrawText(g, BarLabels[i], i == CloseWindow ? font : Theme.Header, buttons[i], i == CloseWindow ? Theme.Ink : Theme.Bright,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
                 }
-                // Sides: a tall grip with ridges; bottom: a wide grip.
-                int gripH = Math.Min(160, (h - Bar) / 3), gy = Bar + (h - Bar - Edge - gripH) / 2;
-                foreach (int gx in new[] { Edge / 2 - 3, w - Edge / 2 - 3 })
-                    for (int y = gy; y < gy + gripH; y += 12) g.FillRectangle(b, gx - 5, y, 16, 4);
-                int gripW = Math.Min(240, w / 4), bx = (w - gripW) / 2;
-                for (int x = bx; x < bx + gripW; x += 12) g.FillRectangle(b, x, h - Edge / 2 - 6, 4, 12);
-            }
         }
 
         void ReleaseWindowPictures()
@@ -5217,65 +5157,38 @@ namespace DinoVisualizer
                 if (nextWindowFrame > soon) nextWindowFrame = soon;
             }
             // The laser left the window: whatever it was holding is let go.
-            if (e.Type == OpenVr.FocusLeave)
-            {
-                EndGrab();
-                pressPending = false;
-                ReleaseWindowMouse();
-                return;
-            }
-            // While the window's being carried, turned or sized, the laser only ends it.
-            if (grab != 0)
-            {
-                if (e.Type == OpenVr.MouseUp) EndGrab();
-                return;
-            }
+            if (e.Type == OpenVr.FocusLeave) { ReleaseWindowMouse(); return; }
             if (e.Type == OpenVr.ScrollSmooth)
             {
                 if (mouseOn != null) Message(mouseOn, WmMouseWheel, (int)(OpenVr.Second(e) * 120) << 16, lastPoint, true);
                 return;
             }
             if (e.Type != OpenVr.MouseMove && e.Type != OpenVr.MouseDown && e.Type != OpenVr.MouseUp) return;
-            var p = new Point((int)((x - Edge) / windowScale), (int)((y - Bar) / windowScale));   // in the window's client area
-            int zone = ZoneAt(x, y);
+            if (y < Bar)
+            {
+                // The bar: its buttons.
+                if (e.Type == OpenVr.MouseDown && OpenVr.Button(e) == OpenVr.LeftButton)
+                {
+                    var buttons = BarButtons(windowTexWidth);
+                    for (int i = 0; i < buttons.Length; i++)
+                        if (buttons[i].Contains((int)x, (int)y)) { BarButton(i); break; }
+                }
+                return;
+            }
+            var p = new Point((int)(x / windowScale), (int)((y - Bar) / windowScale));   // in the window's client area
+            lastPoint = p;
             if (e.Type == OpenVr.MouseDown && OpenVr.Button(e) == OpenVr.LeftButton)
             {
-                if (zone == Close) { ToggleWindow(); return; }
-                if (zone != Content) { StartGrab(zone, x, y); return; }
-                // In the window: a quick press is a click, a press that moves drags (a slider), and holding still a
-                // moment grabs the window (Step watches the clock).
-                pressPending = true;
-                pressAt = DateTime.UtcNow;
-                pressTex = new PointF(x, y);
-                pressPoint = lastPoint = p;
                 mouseOn = ControlAt(p);
-                return;
-            }
-            if (e.Type == OpenVr.MouseUp)
-            {
-                if (pressPending)
-                {
-                    pressPending = false;
-                    Message(mouseOn, WmLButtonDown, MkLButton, pressPoint, false);
-                    Message(mouseOn, WmLButtonUp, 0, pressPoint, false);
-                }
-                else if (mouseHeld)
-                {
-                    mouseHeld = false;
-                    if (mouseOn != null) Message(mouseOn, WmLButtonUp, 0, p, false);
-                }
-                return;
-            }
-            if (pressPending)
-            {
-                if (Math.Abs(x - pressTex.X) + Math.Abs(y - pressTex.Y) < 14) return;   // still deciding
-                pressPending = false;
                 mouseHeld = true;
-                Message(mouseOn, WmLButtonDown, MkLButton, pressPoint, false);       // it's a drag
+                Message(mouseOn, WmLButtonDown, MkLButton, p, false);
             }
-            if (zone != Content && !mouseHeld) return;   // over the frame
-            lastPoint = p;
-            if (e.Type == OpenVr.MouseMove)
+            else if (e.Type == OpenVr.MouseUp && mouseHeld)
+            {
+                mouseHeld = false;
+                if (mouseOn != null) Message(mouseOn, WmLButtonUp, 0, p, false);
+            }
+            else if (e.Type == OpenVr.MouseMove)
             {
                 // While held, the control it went down on keeps getting the moves (dragging a slider).
                 var on = mouseHeld ? mouseOn : ControlAt(p);
@@ -5322,40 +5235,72 @@ namespace DinoVisualizer
             SendMessage(c.Handle, msg, (IntPtr)wParam, (IntPtr)((at.Y << 16) | (at.X & 0xFFFF)));
         }
 
-        // The card as a hologram, as BGRA bytes (row by row from the top), no bigger than limit bytes (scale is texture
-        // pixels per card pixel).
-        public static byte[] Picture(NowPlayingWidget card, double time, int limit, out int width, out int height, out float scale)
+        // ---- Under the card, a strip of buttons for the wrist itself, clicked with the laser like the card's own:
+        // the app's window (open or close it), smaller and bigger, and rotate the card on the wrist.
+        static readonly string[] StripLabels = { "Open App", "Smaller", "Bigger", "Rotate L", "Rotate R" };
+        const int OpenApp = 0, CardSmaller = 1, CardBigger = 2, RotateLeft = 3, RotateRight = 4;
+        int stripHover = -1;
+        int cardTexHeight = 1;   // the card part of the texture (the strip's below it)
+
+        static int StripHeight(int width) { return Math.Max(40, width / 9); }
+
+        // The strip's buttons, side by side across its full width.
+        static Rectangle[] StripButtons(int width, int top, int height)
+        {
+            int n = StripLabels.Length, gap = Math.Max(4, width / 120), w = (width - gap * (n + 1)) / n;
+            var r = new Rectangle[n];
+            for (int i = 0; i < n; i++) r[i] = new Rectangle(gap + i * (w + gap), top + gap, w, height - 2 * gap);
+            return r;
+        }
+
+        void StripButton(int button)
+        {
+            if (button == OpenApp) ToggleWindow();
+            else if (button == CardSmaller || button == CardBigger) Width = Math.Max(0.08f, Math.Min(0.4f, width * (button == CardBigger ? 1.15f : 1 / 1.15f)));
+            else
+            {
+                Roll = ((Roll + (button == RotateLeft ? 15 : -15)) % 360 + 360) % 360;
+                attached = OpenVr.NoDevice;   // mounted again, turned, on the next frame
+            }
+            if (button != OpenApp && Adjusted != null) Adjusted();
+        }
+
+        // The card as a hologram with the strip under it, as BGRA bytes (row by row from the top), the card part no
+        // bigger than limit bytes (scale is texture pixels per card pixel). cardHeight is where the strip starts.
+        public static byte[] Picture(NowPlayingWidget card, double time, int limit, int hover, bool appOpen, out int width, out int height, out int cardHeight, out float scale)
         {
             var area = card.CardArea;
             scale = (float)Math.Min(1, Math.Sqrt(limit / 4.0 / (area.Width * area.Height)));
             width = Math.Max(1, (int)(area.Width * scale));
-            height = Math.Max(1, (int)(area.Height * scale));
+            int ch = cardHeight = Math.Max(1, (int)(area.Height * scale));
+            height = ch + StripHeight(width);
             var bgra = new byte[width * height * 4];
+            DrawStrip(bgra, width, ch, height - ch, hover, appOpen);
             bool layered = card.Style == NowPlayingWidget.AeroStyle || card.Style == NowPlayingWidget.XpStyle || card.Style == NowPlayingWidget.OrbStyle;
             using (var whole = card.Snapshot())
-            using (var snap = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+            using (var snap = new Bitmap(width, ch, PixelFormat.Format32bppArgb))
             {
                 using (var g = Graphics.FromImage(snap))
                 {
                     g.CompositingMode = CompositingMode.SourceCopy;   // keeps the see-through edges
                     g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                     g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                    g.DrawImage(whole, new Rectangle(0, 0, width, height), area, GraphicsUnit.Pixel);
+                    g.DrawImage(whole, new Rectangle(0, 0, width, ch), area, GraphicsUnit.Pixel);
                 }
-                var data = snap.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-                var src = new byte[data.Stride * height];
+                var data = snap.LockBits(new Rectangle(0, 0, width, ch), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+                var src = new byte[data.Stride * ch];
                 Marshal.Copy(data.Scan0, src, 0, src.Length);
                 snap.UnlockBits(data);
                 Color tint = Theme.Primary;
                 float flicker = 0.97f + 0.03f * (float)(Math.Sin(time * 23) * Math.Sin(time * 7.3));   // the faintest shimmer
-                float beam = (float)((time * 0.3) % 1.5 - 0.25) * height;   // a band of light sweeping down every 5 seconds
-                float glitchRow = (float)((time * 1.7) % 1) * height;      // once in a while a few rows slip sideways
+                float beam = (float)((time * 0.3) % 1.5 - 0.25) * ch;   // a band of light sweeping down every 5 seconds
+                float glitchRow = (float)((time * 1.7) % 1) * ch;      // once in a while a few rows slip sideways
                 bool glitch = Math.Sin(time * 0.9) > 0.998;
-                for (int y = 0; y < height; y++)
+                for (int y = 0; y < ch; y++)
                 {
                     float scan = y % 3 == 0 ? 0.55f : 1f;
-                    float band = Math.Max(0, 1 - Math.Abs(y - beam) / (height * 0.07f)) * 0.5f;
-                    int shift = glitch && Math.Abs(y - glitchRow) < height * 0.04f ? (int)(width * 0.02f) : 0;
+                    float band = Math.Max(0, 1 - Math.Abs(y - beam) / (ch * 0.07f)) * 0.5f;
+                    int shift = glitch && Math.Abs(y - glitchRow) < ch * 0.04f ? (int)(width * 0.02f) : 0;
                     for (int x = 0; x < width; x++)
                     {
                         int sx = Math.Min(width - 1, Math.Max(0, x - shift));
@@ -5375,13 +5320,42 @@ namespace DinoVisualizer
             // A glowing frame round the rectangular looks, like the edge of the projection.
             if (!layered)
                 for (int x = 0; x < width; x++)
-                    for (int y = 0; y < height; y++)
-                        if (x < 2 || y < 2 || x >= width - 2 || y >= height - 2)
+                    for (int y = 0; y < ch; y++)
+                        if (x < 2 || y < 2 || x >= width - 2 || y >= ch - 2)
                         {
                             int o = (y * width + x) * 4;
                             bgra[o + 3] = Math.Max(bgra[o + 3], (byte)200);
                         }
             return bgra;
+        }
+
+        // The strip's buttons into the picture's rows from top: see-through dark glass with glowing edges and words in
+        // the accent color, the one the laser's on lit up.
+        static void DrawStrip(byte[] bgra, int width, int top, int height, int hover, bool appOpen)
+        {
+            using (var strip = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+            {
+                var buttons = StripButtons(width, 0, height);
+                using (var g = Graphics.FromImage(strip))
+                using (var font = new Font(Theme.Body.FontFamily, Math.Max(10, Math.Min(height * 0.34f, buttons[0].Width * 0.13f)), FontStyle.Bold, GraphicsUnit.Pixel))
+                using (var center = new StringFormat(StringFormatFlags.NoWrap) { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                {
+                    g.Clear(Color.Transparent);
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;   // keeps the see-through around the words
+                    for (int i = 0; i < buttons.Length; i++)
+                    {
+                        bool lit = i == hover;
+                        using (var b = new SolidBrush(Color.FromArgb(lit ? 150 : 90, lit ? Theme.Primary : Color.FromArgb(10, 12, 18)))) g.FillRectangle(b, buttons[i]);
+                        using (var p = new Pen(Color.FromArgb(220, lit ? Theme.Bright : Theme.Primary), Math.Max(2, height / 20))) g.DrawRectangle(p, buttons[i]);
+                        string label = i == OpenApp && appOpen ? "Close App" : StripLabels[i];
+                        using (var b = new SolidBrush(lit ? Color.White : Theme.Bright)) g.DrawString(label, font, b, buttons[i], center);
+                    }
+                }
+                var data = strip.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+                for (int y = 0; y < height; y++) Marshal.Copy(data.Scan0 + y * data.Stride, bgra, (top + y) * width * 4, width * 4);
+                strip.UnlockBits(data);
+            }
         }
     }
 
@@ -11216,6 +11190,13 @@ namespace DinoVisualizer
             wrist.App = this;
             wrist.Live = page;
             wrist.WindowWidth = (float)Math.Max(0.4, Math.Min(3, Settings.Num("vrwindowsize", 1)));
+            wrist.Roll = (float)Settings.Num("vrwristroll", 0);
+            wrist.Adjusted += () =>
+            {
+                Settings.Set("vrwristsize", Math.Round(wrist.Width, 3));
+                Settings.Set("vrwristroll", wrist.Roll);
+                options.Invalidate();   // the VR Wrist Size row
+            };
             wrist.WindowResized += size => Settings.Set("vrwindowsize", Math.Round(size, 2));
             wrist.Visualizer = vizStyle;
             wrist.Command += slot => { if (watcher != null) watcher.Send(slot); };
@@ -11502,6 +11483,11 @@ namespace DinoVisualizer
             {
                 Label = "VR Wrist Look:", Choices = VrWrist.Looks, Current = () => wrist.Look,
                 Choose = i => { wrist.Look = i; Settings.Set("vrwristlook", i); }
+            });
+            options.Rows.Add(new OptionsPanel.Row
+            {
+                Label = "VR Wrist Size:", Choices = VrWrist.Sizes, Current = () => wrist.SizeIndex,
+                Choose = i => { wrist.SizeIndex = i; Settings.Set("vrwristsize", wrist.Width); }
             });
             options.Rows.Add(new OptionsPanel.Row
             {

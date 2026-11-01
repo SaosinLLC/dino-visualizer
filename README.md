@@ -252,7 +252,7 @@ Technical details:
   - It's the "Dino Visualizer" entry in your user's startup list (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`), so it also shows in Task Manager's Startup apps.
   - If you move the app's folder, open the app once from the new place and the entry follows it.
 - **VRChat Chatbox**: *Off*, *Song*, *Song + Time*, *Song + Progress Bar*, or any of those with the lyrics. It shows what's playing above your head in VRChat (see [VRChat chatbox](#vrchat-chatbox)).
-- **VR Wrist** and **VR Wrist Look**: the hologram card on your wrist in SteamVR (see [VR wrist](#vr-wrist-steamvr)).
+- **VR Wrist**, **VR Wrist Look** and **VR Wrist Size**: the hologram card on your wrist in SteamVR (see [VR wrist](#vr-wrist-steamvr)).
 - **Chatbox Adlibs**: how background vocals and adlibs look in the chatbox's lyrics: *Tiny*, *Small Caps*, *Normal* or *Hidden*.
 - **Chatbox Bar**: how the chatbox's progress bar looks. There are 15 styles, from *Line* to *Hash*; each choice in the list shows a sample.
 - **Scanlines**, **Color Preset**, **Accent Hue**, **Accent Saturation**: the same look controls as Dino Monitor.
@@ -290,18 +290,27 @@ How to use it:
 - **Show it**: turn the chosen side of your wrist toward your face. It fades in within about 40 degrees of facing you, and fades out once you turn it well away.
 - **Press a button**: point your other controller at the card. SteamVR's laser beam comes out of it, the button under the beam lights up, and pulling the trigger presses it (Previous, Play/Pause, Next).
   - While the card is showing, your controllers point at it instead of the game; that ends when you turn your wrist away.
+- **The buttons under the card** work the same way:
+
+  | Button | What it does |
+  |---|---|
+  | **Open App** / **Close App** | Opens or closes Dino Visualizer's window in front of you |
+  | **Smaller** / **Bigger** | Resizes the card (remembered, and shown in **VR Wrist Size**) |
+  | **Rotate L** / **Rotate R** | Turns the card on your wrist, 15° a click (remembered) |
 - **Open the app's window in VR**: turn your wrist toward your face twice within about a second (show it, turn away, show it again).
   - Dino Visualizer's window appears about 80 cm in front of where you're looking, a meter wide, even while it's put away in the tray on the desktop.
   - It's live: the visualizer, lyrics and everything else move, redrawn about 6 times a second.
   - Point at anything with the laser and pull the trigger to click it: tabs, player buttons, options, drop-downs. Sliders drag while the trigger's held, and the thumbstick scrolls lyrics, lists and the Options panel.
-  - Close it with the **✕** on its bar, or with the same double turn.
-  - **Put it where you like**: hold the trigger on the top bar or the bottom edge, or hold the trigger still on the window itself for about half a second, and it follows your hand (moving and tilting with it) until you let go. A quick press in the window is still a click, and a press that moves straight away still drags (sliders).
-  - **Turn it**: hold the trigger on the left or right side (the ridged grips) and swing your hand left or right; it turns round its middle.
-  - **Resize it**: hold the trigger on a corner (the brackets) and pull out or in. The size is remembered for next time (`vrwindowsize` in `settings.ini`, in meters).
+  - The buttons on its top bar are clicked like anything else:
 
-**Fine-tuning:** controllers differ, so if it sits in an odd spot, you can move or resize it in `%AppData%\Dino Visualizer\settings.ini` (with the app closed):
-- `vrwristx`, `vrwristy` and `vrwristz` move it, in meters. Use `x` for left/right, `y` for up/down, and `z` toward your elbow (positive) or hand (negative), as the controller sees it.
-- `vrwristsize` is its width in meters (default `0.17`).
+    | Button | What it does |
+    |---|---|
+    | **Bring Here** | Moves the window in front of wherever you're looking now |
+    | **Smaller** / **Bigger** | Resizes it (remembered) |
+    | **Turn Left** / **Turn Right** | Turns it, 15° a click |
+    | **✕** | Closes it (so does the double turn, or **Close App** under the wrist card) |
+
+**VR Wrist Size** in Options makes the wrist card *Small*, *Medium* or *Large*. It changes straight away.
 
 **How it works:** it uses SteamVR's own `openvr_api.dll` from your SteamVR folder, so nothing extra is installed. The card and the window are handed to SteamVR as textures on your graphics card (Direct3D 11) that are updated in place, so they don't flicker. The card is updated about 16 times a second while it's showing, and nothing is drawn while it's hidden. It sits up your forearm, clear of the controller, since SteamVR draws controllers in front of overlays. The laser is SteamVR's own (the same as in its dashboard), turned on for the card and the window only while they're showing.
 
