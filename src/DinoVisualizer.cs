@@ -19,7 +19,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.1.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.1.1.0")]
 [assembly: System.Reflection.AssemblyTitle("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyProduct("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyCompany("Saosin LLC")]
@@ -4391,7 +4391,7 @@ namespace DinoVisualizer
 
         public const uint NoDevice = 0xFFFFFFFF, Hmd = 0, MaxDevices = 64;
         public const int LeftHand = 1, RightHand = 2, Standing = 1, QuitEvent = 700;
-        public const uint MouseMove = 300, MouseDown = 301, MouseUp = 302, ScrollSmooth = 309, LeftButton = 1;
+        public const uint MouseMove = 300, MouseDown = 301, MouseUp = 302, FocusLeave = 304, ScrollSmooth = 309, LeftButton = 1;
         // The laser from the other hand points at an overlay with this while it's visible (no dashboard needed), and
         // it gets smooth scroll events from the thumbstick.
         public const int InteractiveIfVisible = 65536, SmoothScroll = 131072, MouseInput = 1;
@@ -4759,6 +4759,12 @@ namespace DinoVisualizer
         {
             OpenVr.GetPoses(OpenVr.Standing, 0.02f, poses, OpenVr.MaxDevices);
             Pointing();
+            if (pressPending && DateTime.UtcNow - pressAt >= HoldToGrab)
+            {
+                pressPending = false;
+                StartGrab(Move, pressTex.X, pressTex.Y);   // held still on the window: grabbed
+            }
+            StepGrab();
             if (windowOpen && DateTime.UtcNow >= nextWindowFrame)
             {
                 var took = Stopwatch.StartNew();
@@ -4905,18 +4911,32 @@ namespace DinoVisualizer
         }
 
         // ---- The app's window floating in VR: about 80 cm in front of where you were looking when it opened, level
-        // and facing you, a meter wide. It's redrawn several times a second while it's open. Above it is a bar with a close
-        // button. The laser's moves, trigger and thumbstick scrolling go to the control under it as mouse messages,
-        // so everything in the window works (sliders drag, lists open and scroll).
+        // and facing you. It's redrawn several times a second while it's open. Round it is a frame: a bar on top with a
+        // close button, and handles. With the trigger held, the bar and the bottom edge carry it wherever the hand
+        // goes, the sides turn it round, and the corners make it bigger or smaller. In the window itself the laser's
+        // moves, trigger and thumbstick scrolling go to the control under it as mouse messages, so everything works
+        // (sliders drag, lists open and scroll); holding the trigger still on it for a moment grabs the window there too.
 
-        const float WindowWidth = 1.0f;
-        const int Bar = 56, MaxWindowWidth = 1600;
+        public float WindowWidth = 1.0f;     // meters (settings.ini: vrwindowsize, kept when it's resized)
+        public event Action<float> WindowResized;
+        const int Bar = 56, Edge = 28, Corner = 64, MaxWindowWidth = 1600;
+        const int Content = 0, Move = 1, Turn = 2, Resize = 3, Close = 4;
+        static readonly TimeSpan HoldToGrab = TimeSpan.FromSeconds(0.45);
         bool windowOpen;
         DateTime nextWindowFrame;
         int windowTexWidth = 1, windowTexHeight = 1;
         float windowScale = 1;   // texture pixels per window pixel
         Control mouseOn;         // the control the laser's over (or holding, while the trigger's down)
         bool mouseHeld;
+        OpenVr.Matrix34 windowAt;   // where the window is in the room
+        int grab;                   // what the held trigger is doing to the window (Move, Turn, Resize), 0 nothing
+        uint grabHand;              // the controller doing it
+        OpenVr.Matrix34 grabHandAt, grabWindowAt;   // both as they were when the grab began
+        float grabWidth, grabReach;
+        bool pressPending;          // the trigger's down on the window: a click, a drag or a grab, soon to be seen
+        DateTime pressAt;
+        PointF pressTex;
+        Point pressPoint;
 
         public bool WindowOpen { get { return windowOpen; } }
 
@@ -4924,6 +4944,8 @@ namespace DinoVisualizer
         {
             if (window == 0 || App == null) return;
             windowOpen = !windowOpen;
+            grab = 0;
+            pressPending = false;
             if (!windowOpen)
             {
                 ReleaseWindowMouse();
@@ -4939,15 +4961,124 @@ namespace DinoVisualizer
             fz /= len;
             // Columns: right = up x face, up, and the face pointing back at you.
             float zx = -fx, zz = -fz;
-            var at = new OpenVr.Matrix34
+            windowAt = new OpenVr.Matrix34
             {
                 M0 = zz, M1 = 0, M2 = zx, M3 = head.M3 + fx * 0.8f,
                 M4 = 0, M5 = 1, M6 = 0, M7 = head.M7 - 0.05f,
                 M8 = -zx, M9 = 0, M10 = zz, M11 = head.M11 + fz * 0.8f
             };
-            OpenVr.SetAbsolute(window, OpenVr.Standing, ref at);
+            OpenVr.SetAbsolute(window, OpenVr.Standing, ref windowAt);
+            OpenVr.SetWidth(window, WindowWidth);
             UploadWindow();
             OpenVr.ShowOverlay(window);
+        }
+
+        // Which part of the frame a spot on the window's picture is in (y from the top).
+        int ZoneAt(float x, float y)
+        {
+            int w = windowTexWidth, h = windowTexHeight;
+            bool left = x < Corner, right = x > w - Corner, top = y < Corner, bottom = y > h - Corner;
+            if ((left || right) && (top || bottom)) return Resize;
+            if (y < Bar && x >= CloseX(w) && x < CloseX(w) + Bar) return Close;
+            if (y < Bar || y > h - Edge) return Move;
+            if (x < Edge || x > w - Edge) return Turn;
+            return Content;
+        }
+
+        static int CloseX(int width) { return width - Corner - Bar - 6; }
+
+        // Where a controller's laser meets the window, in meters across and up from its middle; false if it doesn't.
+        static bool Hit(OpenVr.Matrix34 at, OpenVr.Matrix34 hand, out float x, out float y)
+        {
+            x = y = 0;
+            float dx = -hand.M2, dy = -hand.M6, dz = -hand.M10;             // the way it points
+            float denom = dx * at.M2 + dy * at.M6 + dz * at.M10;
+            if (Math.Abs(denom) < 1e-4f) return false;
+            float t = ((at.M3 - hand.M3) * at.M2 + (at.M7 - hand.M7) * at.M6 + (at.M11 - hand.M11) * at.M10) / denom;
+            if (t < 0) return false;
+            float rx = hand.M3 + dx * t - at.M3, ry = hand.M7 + dy * t - at.M7, rz = hand.M11 + dz * t - at.M11;
+            x = rx * at.M0 + ry * at.M4 + rz * at.M8;
+            y = rx * at.M1 + ry * at.M5 + rz * at.M9;
+            return true;
+        }
+
+        // The controller whose laser meets the window nearest a spot on its picture (NoDevice if neither does).
+        uint HandAt(float texX, float texY)
+        {
+            uint best = OpenVr.NoDevice;
+            float bestDistance = float.MaxValue, height = WindowWidth * windowTexHeight / windowTexWidth;
+            foreach (int role in new[] { OpenVr.LeftHand, OpenVr.RightHand })
+            {
+                uint hand = OpenVr.RoleIndex(role);
+                float x, y;
+                if (hand >= OpenVr.MaxDevices || !poses[hand].Valid || !Hit(windowAt, poses[hand].DeviceToAbsolute, out x, out y)) continue;
+                float px = (x / WindowWidth + 0.5f) * windowTexWidth, py = (0.5f - y / height) * windowTexHeight;
+                float d = (px - texX) * (px - texX) + (py - texY) * (py - texY);
+                if (d < bestDistance) { bestDistance = d; best = hand; }
+            }
+            return best;
+        }
+
+        void StartGrab(int kind, float texX, float texY)
+        {
+            uint hand = HandAt(texX, texY);
+            if (hand == OpenVr.NoDevice) return;
+            ReleaseWindowMouse();
+            grab = kind;
+            grabHand = hand;
+            grabHandAt = poses[hand].DeviceToAbsolute;
+            grabWindowAt = windowAt;
+            grabWidth = WindowWidth;
+            float x, y;
+            grabReach = Hit(windowAt, grabHandAt, out x, out y) ? Math.Max(0.05f, (float)Math.Sqrt(x * x + y * y)) : 0.5f;
+        }
+
+        void EndGrab()
+        {
+            if (grab == Resize && WindowResized != null) WindowResized(WindowWidth);
+            grab = 0;
+        }
+
+        // Each frame of a grab: carried with the hand (moving and tilting with it), turned round its middle as the hand
+        // swings left or right, or sized by how far from its middle the laser now meets it.
+        void StepGrab()
+        {
+            if (grab == 0 || !poses[grabHand].Valid) return;
+            var hand = poses[grabHand].DeviceToAbsolute;
+            if (grab == Move) windowAt = Multiply(hand, Multiply(Inverse(grabHandAt), grabWindowAt));
+            else if (grab == Turn) windowAt = TurnAbout(grabWindowAt, Yaw(hand) - Yaw(grabHandAt));
+            else
+            {
+                float x, y;
+                if (!Hit(windowAt, hand, out x, out y)) return;
+                WindowWidth = Math.Max(0.4f, Math.Min(3f, grabWidth * (float)Math.Sqrt(x * x + y * y) / grabReach));
+                OpenVr.SetWidth(window, WindowWidth);
+                return;
+            }
+            OpenVr.SetAbsolute(window, OpenVr.Standing, ref windowAt);
+        }
+
+        // The inverse of a pose (a turn and a move): turned back, then moved back.
+        public static OpenVr.Matrix34 Inverse(OpenVr.Matrix34 m)
+        {
+            var r = new OpenVr.Matrix34 { M0 = m.M0, M1 = m.M4, M2 = m.M8, M4 = m.M1, M5 = m.M5, M6 = m.M9, M8 = m.M2, M9 = m.M6, M10 = m.M10 };
+            r.M3 = -(r.M0 * m.M3 + r.M1 * m.M7 + r.M2 * m.M11);
+            r.M7 = -(r.M4 * m.M3 + r.M5 * m.M7 + r.M6 * m.M11);
+            r.M11 = -(r.M8 * m.M3 + r.M9 * m.M7 + r.M10 * m.M11);
+            return r;
+        }
+
+        // Which way a controller points, round the vertical (radians).
+        public static float Yaw(OpenVr.Matrix34 m) { return (float)Math.Atan2(-m.M2, -m.M10); }
+
+        // A pose turned round the vertical through its own middle.
+        public static OpenVr.Matrix34 TurnAbout(OpenVr.Matrix34 m, float angle)
+        {
+            float c = (float)Math.Cos(angle), s = (float)Math.Sin(angle);
+            var r = m;
+            r.M0 = c * m.M0 + s * m.M8; r.M1 = c * m.M1 + s * m.M9; r.M2 = c * m.M2 + s * m.M10;
+            r.M8 = -s * m.M0 + c * m.M8; r.M9 = -s * m.M1 + c * m.M9; r.M10 = -s * m.M2 + c * m.M10;
+            return r;
         }
 
         // ---- Drawing the window costs a lot (the whole thing at once took 160 ms or more), so it's drawn a part at a
@@ -4989,7 +5120,8 @@ namespace DinoVisualizer
             var size = App.ClientSize;
             if (size.Width < 200 || size.Height < 150) return false;
             windowScale = Math.Min(1f, MaxWindowWidth / (float)size.Width);
-            int w = (int)(size.Width * windowScale), h = (int)(size.Height * windowScale) + Bar;
+            int cw = (int)(size.Width * windowScale), ch = (int)(size.Height * windowScale);   // the window, under the bar
+            int w = cw + 2 * Edge, h = ch + Bar + Edge;                                           // with the frame round it
             if (windowCanvas == null || windowCanvas.Size != size)
             {
                 if (windowCanvas != null) windowCanvas.Dispose();
@@ -5016,22 +5148,47 @@ namespace DinoVisualizer
             {
                 g.InterpolationMode = windowScale < 1 ? InterpolationMode.Bilinear : InterpolationMode.NearestNeighbor;
                 g.PixelOffsetMode = PixelOffsetMode.Half;
-                g.DrawImage(windowCanvas, new Rectangle(0, Bar, w, h - Bar));
-                if (full) DrawBar(g, w);
+                g.DrawImage(windowCanvas, new Rectangle(Edge, Bar, cw, ch));
+                if (full) DrawFrame(g, w, h);
             }
             return true;
         }
 
-        // The bar above the window: the name, how to close it, and a close button.
-        static void DrawBar(Graphics g, int w)
+        // The frame round the window: the bar on top (the name, what the handles do, and a close button), the sides and
+        // bottom edge, and the handles: corner brackets (resize), grips on the sides (turn) and on the bottom (move).
+        static void DrawFrame(Graphics g, int w, int h)
         {
-            using (var b = new SolidBrush(Theme.Ink)) g.FillRectangle(b, 0, 0, w, Bar);
-            using (var b = new SolidBrush(Theme.Primary)) g.FillRectangle(b, 0, Bar - 3, w, 3);
-            TextRenderer.DrawText(g, "Dino Visualizer   ·   point and pull the trigger to click   ·   turn your wrist twice to close", Theme.Header,
-                new Rectangle(18, 0, w - Bar * 2, Bar - 3), Theme.Primary, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
-            var close = new Rectangle(w - Bar * 3 / 2, 6, Bar, Bar - 15);
+            using (var b = new SolidBrush(Theme.Ink))
+            {
+                g.FillRectangle(b, 0, 0, w, Bar);
+                g.FillRectangle(b, 0, Bar, Edge, h - Bar);
+                g.FillRectangle(b, w - Edge, Bar, Edge, h - Bar);
+                g.FillRectangle(b, 0, h - Edge, w, Edge);
+            }
+            using (var b = new SolidBrush(Theme.Faint)) g.FillRectangle(b, Edge - 2, Bar - 2, w - 2 * Edge + 4, 2);
+            int closeX = CloseX(w);
+            TextRenderer.DrawText(g, "Dino Visualizer   ·   hold the trigger: here or in the middle moves it, the sides turn it, the corners resize it", Theme.Header,
+                new Rectangle(Corner, 0, closeX - Corner - 12, Bar - 3), Theme.Primary, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+            var close = new Rectangle(closeX, 8, Bar, Bar - 16);
             using (var b = new SolidBrush(Theme.Primary)) g.FillRectangle(b, close);
             TextRenderer.DrawText(g, "✕", Theme.Header, close, Theme.Ink, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            using (var p = new Pen(Theme.Primary, 3)) g.DrawRectangle(p, 1, 1, w - 3, h - 3);
+            using (var b = new SolidBrush(Theme.Bright))
+            {
+                // Corners: thick brackets.
+                int t = 8, len = Corner - 6;
+                foreach (var c in new[] { new Point(0, 0), new Point(w, 0), new Point(0, h), new Point(w, h) })
+                {
+                    g.FillRectangle(b, c.X == 0 ? 0 : w - len, c.Y == 0 ? 0 : h - t, len, t);
+                    g.FillRectangle(b, c.X == 0 ? 0 : w - t, c.Y == 0 ? 0 : h - len, t, len);
+                }
+                // Sides: a tall grip with ridges; bottom: a wide grip.
+                int gripH = Math.Min(160, (h - Bar) / 3), gy = Bar + (h - Bar - Edge - gripH) / 2;
+                foreach (int gx in new[] { Edge / 2 - 3, w - Edge / 2 - 3 })
+                    for (int y = gy; y < gy + gripH; y += 12) g.FillRectangle(b, gx - 5, y, 16, 4);
+                int gripW = Math.Min(240, w / 4), bx = (w - gripW) / 2;
+                for (int x = bx; x < bx + gripW; x += 12) g.FillRectangle(b, x, h - Edge / 2 - 6, 4, 12);
+            }
         }
 
         void ReleaseWindowPictures()
@@ -5059,32 +5216,66 @@ namespace DinoVisualizer
                 var soon = DateTime.UtcNow.AddMilliseconds(60);
                 if (nextWindowFrame > soon) nextWindowFrame = soon;
             }
+            // The laser left the window: whatever it was holding is let go.
+            if (e.Type == OpenVr.FocusLeave)
+            {
+                EndGrab();
+                pressPending = false;
+                ReleaseWindowMouse();
+                return;
+            }
+            // While the window's being carried, turned or sized, the laser only ends it.
+            if (grab != 0)
+            {
+                if (e.Type == OpenVr.MouseUp) EndGrab();
+                return;
+            }
             if (e.Type == OpenVr.ScrollSmooth)
             {
                 if (mouseOn != null) Message(mouseOn, WmMouseWheel, (int)(OpenVr.Second(e) * 120) << 16, lastPoint, true);
                 return;
             }
             if (e.Type != OpenVr.MouseMove && e.Type != OpenVr.MouseDown && e.Type != OpenVr.MouseUp) return;
-            if (y < Bar)
-            {
-                // The bar: the close button closes it.
-                if (e.Type == OpenVr.MouseDown && x > windowTexWidth - Bar * 2) ToggleWindow();
-                return;
-            }
-            var p = new Point((int)(x / windowScale), (int)((y - Bar) / windowScale));   // in the window's client area
-            lastPoint = p;
+            var p = new Point((int)((x - Edge) / windowScale), (int)((y - Bar) / windowScale));   // in the window's client area
+            int zone = ZoneAt(x, y);
             if (e.Type == OpenVr.MouseDown && OpenVr.Button(e) == OpenVr.LeftButton)
             {
+                if (zone == Close) { ToggleWindow(); return; }
+                if (zone != Content) { StartGrab(zone, x, y); return; }
+                // In the window: a quick press is a click, a press that moves drags (a slider), and holding still a
+                // moment grabs the window (Step watches the clock).
+                pressPending = true;
+                pressAt = DateTime.UtcNow;
+                pressTex = new PointF(x, y);
+                pressPoint = lastPoint = p;
                 mouseOn = ControlAt(p);
-                mouseHeld = true;
-                Message(mouseOn, WmLButtonDown, MkLButton, p, false);
+                return;
             }
-            else if (e.Type == OpenVr.MouseUp && mouseHeld)
+            if (e.Type == OpenVr.MouseUp)
             {
-                mouseHeld = false;
-                if (mouseOn != null) Message(mouseOn, WmLButtonUp, 0, p, false);
+                if (pressPending)
+                {
+                    pressPending = false;
+                    Message(mouseOn, WmLButtonDown, MkLButton, pressPoint, false);
+                    Message(mouseOn, WmLButtonUp, 0, pressPoint, false);
+                }
+                else if (mouseHeld)
+                {
+                    mouseHeld = false;
+                    if (mouseOn != null) Message(mouseOn, WmLButtonUp, 0, p, false);
+                }
+                return;
             }
-            else if (e.Type == OpenVr.MouseMove)
+            if (pressPending)
+            {
+                if (Math.Abs(x - pressTex.X) + Math.Abs(y - pressTex.Y) < 14) return;   // still deciding
+                pressPending = false;
+                mouseHeld = true;
+                Message(mouseOn, WmLButtonDown, MkLButton, pressPoint, false);       // it's a drag
+            }
+            if (zone != Content && !mouseHeld) return;   // over the frame
+            lastPoint = p;
+            if (e.Type == OpenVr.MouseMove)
             {
                 // While held, the control it went down on keeps getting the moves (dragging a slider).
                 var on = mouseHeld ? mouseOn : ControlAt(p);
@@ -11024,6 +11215,8 @@ namespace DinoVisualizer
             wrist.LevelSource = () => watcher != null ? watcher.Level : 0;
             wrist.App = this;
             wrist.Live = page;
+            wrist.WindowWidth = (float)Math.Max(0.4, Math.Min(3, Settings.Num("vrwindowsize", 1)));
+            wrist.WindowResized += size => Settings.Set("vrwindowsize", Math.Round(size, 2));
             wrist.Visualizer = vizStyle;
             wrist.Command += slot => { if (watcher != null) watcher.Send(slot); };
             wrist.Changed += () => { if (IsHandleCreated && !IsDisposed) BeginInvoke((Action)UpdateStatus); };

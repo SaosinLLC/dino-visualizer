@@ -295,6 +295,9 @@ How to use it:
   - It's live: the visualizer, lyrics and everything else move, redrawn about 6 times a second.
   - Point at anything with the laser and pull the trigger to click it: tabs, player buttons, options, drop-downs. Sliders drag while the trigger's held, and the thumbstick scrolls lyrics, lists and the Options panel.
   - Close it with the **✕** on its bar, or with the same double turn.
+  - **Put it where you like**: hold the trigger on the top bar or the bottom edge, or hold the trigger still on the window itself for about half a second, and it follows your hand (moving and tilting with it) until you let go. A quick press in the window is still a click, and a press that moves straight away still drags (sliders).
+  - **Turn it**: hold the trigger on the left or right side (the ridged grips) and swing your hand left or right; it turns round its middle.
+  - **Resize it**: hold the trigger on a corner (the brackets) and pull out or in. The size is remembered for next time (`vrwindowsize` in `settings.ini`, in meters).
 
 **Fine-tuning:** controllers differ, so if it sits in an odd spot, you can move or resize it in `%AppData%\Dino Visualizer\settings.ini` (with the app closed):
 - `vrwristx`, `vrwristy` and `vrwristz` move it, in meters. Use `x` for left/right, `y` for up/down, and `z` toward your elbow (positive) or hand (negative), as the controller sees it.
