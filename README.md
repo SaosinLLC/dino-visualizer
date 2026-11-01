@@ -201,6 +201,8 @@ There are three options:
 
     There's no tiny "q", so it stays normal size. If the tiny letters show as boxes in VRChat, use *Small Caps*.
 
+- **Chatbox Clock** puts your computer's time at the top of the bubble, above your status and the song: *12-Hour* (`3:45 PM`) or *24-Hour* (`15:45`). It works on its own too, even with VRChat Chatbox set to *Off* and nothing playing.
+
 How it behaves:
 
 - It uses the same song as the window, with the text kept short so as much as possible fits in VRChat's 144 characters:
@@ -255,6 +257,7 @@ Technical details:
 - **VR Wrist**, **VR Wrist Look** and **VR Wrist Size**: the hologram card on your wrist in SteamVR (see [VR wrist](#vr-wrist-steamvr)).
 - **Chatbox Adlibs**: how background vocals and adlibs look in the chatbox's lyrics: *Tiny*, *Small Caps*, *Normal* or *Hidden*.
 - **Chatbox Bar**: how the chatbox's progress bar looks. There are 15 styles, from *Line* to *Hash*; each choice in the list shows a sample.
+- **Chatbox Clock**: your computer's time at the top of the chatbox: *Off*, *12-Hour* or *24-Hour*.
 - **Scanlines**, **Color Preset**, **Accent Hue**, **Accent Saturation**: the same look controls as Dino Monitor.
 - **Hue Cycle**: *Off*, *Slow*, *Medium* or *Fast*. The accent color keeps turning round the color wheel: a full turn takes 2 minutes, 40 seconds or 12 seconds. Everything that follows the accent color turns with it, including the window, the visualizer and the widget's tinted styles.
 - **Random Colors**: *Off*, *On Beats*, *Every 5 s* or *Every 15 s*. The accent color glides to a new random color on the music's beats (at most twice a second, and at least every 3 seconds while music plays, in case a song has no clear beats) or on a timer, and with more than one color the palette is reshuffled to random spots on the color wheel. It works together with Hue Cycle.

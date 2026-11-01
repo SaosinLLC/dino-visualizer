@@ -19,7 +19,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.2.1.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.2.0")]
 [assembly: System.Reflection.AssemblyTitle("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyProduct("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyCompany("Saosin LLC")]
@@ -8006,8 +8006,32 @@ namespace DinoVisualizer
             {
                 if (value == mode) return;
                 mode = value;
-                if (mode == 0 && !statusOn) Stop();
+                if (!Sending) Stop();
             }
+        }
+
+        // ---- The clock: this computer's time as the bubble's first line, over the status and the song (or alone).
+        public static readonly string[] ClockNames = { "Off", "12-Hour (3:45 PM)", "24-Hour (15:45)" };
+        static int clockStyle;
+
+        public static int ClockStyle
+        {
+            get { return clockStyle; }
+            set
+            {
+                if (value == clockStyle) return;
+                clockStyle = value;
+                if (!Sending) Stop();
+            }
+        }
+
+        // Whether anything is picked to go in the bubble.
+        public static bool Sending { get { return mode != 0 || statusOn || clockStyle != 0; } }
+
+        static string TimeLine()
+        {
+            if (clockStyle == 0) return "";
+            return DateTime.Now.ToString(clockStyle == 1 ? "h:mm tt" : "HH:mm", System.Globalization.CultureInfo.InvariantCulture);
         }
 
         // ---- The status: lines of your own (like "chilling in the club"), one shown at a time above the song, or alone
@@ -8037,7 +8061,7 @@ namespace DinoVisualizer
             {
                 statusOn = value;
                 Settings.Set("vrcstatus", value ? 1 : 0);
-                if (!statusOn && mode == 0) Stop();
+                if (!Sending) Stop();
             }
         }
 
@@ -8096,7 +8120,7 @@ namespace DinoVisualizer
         // Called twice a second with what's playing.
         public static void Tick(NowPlayingInfo info)
         {
-            if (mode == 0 && !statusOn) return;
+            if (!Sending) return;
             if (statusOn && cycle > 0 && Statuses.Count > 1 && (DateTime.UtcNow - statusSince).TotalSeconds >= CycleSeconds[cycle])
             {
                 statusIndex = (StatusIndex + 1) % Statuses.Count;
@@ -8131,8 +8155,8 @@ namespace DinoVisualizer
             return Text(info, mode, MaxLength, out words, out next);
         }
 
-        // Everything the bubble shows now: the status (if it's on) over the song (while one plays and a VRChat Chatbox
-        // choice is picked). "" when there's nothing to show.
+        // Everything the bubble shows now: the clock (if it's on), over the status (if it's on), over the song (while one
+        // plays and a VRChat Chatbox choice is picked). "" when there's nothing to show.
         public static string Compose(NowPlayingInfo info)
         {
             string words;
@@ -8140,14 +8164,24 @@ namespace DinoVisualizer
             return Compose(info, out words, out next);
         }
 
+        // words leaves out the clock, like the song's time line: a new minute alone doesn't hurry an update.
         static string Compose(NowPlayingInfo info, out string words, out TimeSpan next)
+        {
+            string time = TimeLine();
+            string body = Below(info, time == "" ? MaxLength : MaxLength - time.Length - 1, out words, out next);
+            if (time == "") return body;
+            return body == "" ? time : time + "\n" + body;
+        }
+
+        // The status over the song, in max characters.
+        static string Below(NowPlayingInfo info, int max, out string words, out TimeSpan next)
         {
             next = TimeSpan.Zero;
             string status = statusOn && StatusIndex >= 0 ? Statuses[StatusIndex] : "";
-            if (mode == 0 || !info.Playing || info.Title == "") return words = Cut(status, MaxLength);
-            if (status == "") return Text(info, mode, MaxLength, out words, out next);
+            if (mode == 0 || !info.Playing || info.Title == "") return words = Cut(status, max);
+            if (status == "") return Text(info, mode, max, out words, out next);
             status = Cut(status, 70);
-            string body = Text(info, mode, MaxLength - status.Length - 1, out words, out next);
+            string body = Text(info, mode, max - status.Length - 1, out words, out next);
             words = status + "\n" + words;
             return status + "\n" + body;
         }
@@ -10917,7 +10951,7 @@ namespace DinoVisualizer
             Theme.DrawSpaced(g, "In VRChat Now", Theme.TileTitle, Theme.Primary, r.X, r.Y + (h - Theme.TileTitle.Height) / 2, Theme.S(1));
             int y = r.Y + h + Theme.S(14);
             string text = VrcChatbox.Compose(info);
-            bool sending = VrcChatbox.Mode != 0 || VrcChatbox.StatusOn;
+            bool sending = VrcChatbox.Sending;
             const TextFormatFlags wrap = TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding | TextFormatFlags.HorizontalCenter;
             int tw = r.Width - Theme.S(32);
             string shown = text != "" ? text : "(nothing)";
@@ -10931,8 +10965,8 @@ namespace DinoVisualizer
                     text != "" && sending ? Color.FromArgb(240, 240, 245) : Color.FromArgb(120, 122, 130), wrap);
                 y = bubble.Bottom + Theme.S(10);
             }
-            string note = !sending ? "Not sending. Switch the status on, or pick a VRChat Chatbox option in Options for the song."
-                        : VrcChatbox.Mode == 0 ? "Status only: pick a VRChat Chatbox option in Options to add the song."
+            string note = !sending ? "Not sending. Switch the status on, or pick a VRChat Chatbox or Chatbox Clock option in Options."
+                        : VrcChatbox.Mode == 0 ? "No song: pick a VRChat Chatbox option in Options to add it."
                         : "Sent to VRChat on this computer (OSC), with OSC on in VRChat's Action Menu.";
             const TextFormatFlags noteFlags = TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
             int noteH = TextRenderer.MeasureText(g, note, Theme.Body, new Size(r.Width, int.MaxValue), noteFlags).Height;
@@ -11352,6 +11386,7 @@ namespace DinoVisualizer
             int oldBar = (int)Settings.Num("vrcbar", 0);
             VrcChatbox.Bar = Clamp(Settings.Num("vrcbar2", oldBar == 14 ? 0 : oldBar > 14 ? oldBar - 1 : oldBar), VrcChatbox.BarNames.Length);
             VrcChatbox.Adlibs = Clamp(Settings.Num("vrcadlibs", 0), VrcChatbox.AdlibNames.Length);
+            VrcChatbox.ClockStyle = Clamp(Settings.Num("vrcclock", 0), VrcChatbox.ClockNames.Length);
             VrcChatbox.Restore(Settings.Num("vrcstatus", 0) != 0, (int)Settings.Num("vrcstatuscycle", 0), (int)Settings.Num("vrcstatusidx", 0));
             Updater.Mode = Clamp(Settings.Num("updates", 0), Updater.Names.Length);
             // The VR wrist (it only connects while SteamVR is running).
@@ -11647,6 +11682,11 @@ namespace DinoVisualizer
             {
                 Label = "Chatbox Adlibs:", Choices = VrcChatbox.AdlibNames, Current = () => VrcChatbox.Adlibs,
                 Choose = i => { VrcChatbox.Adlibs = i; Settings.Set("vrcadlibs", i); VrcChatbox.Tick(current); }
+            });
+            options.Rows.Add(new OptionsPanel.Row
+            {
+                Label = "Chatbox Clock:", Choices = VrcChatbox.ClockNames, Current = () => VrcChatbox.ClockStyle,
+                Choose = i => { VrcChatbox.ClockStyle = i; Settings.Set("vrcclock", i); VrcChatbox.Tick(current); }
             });
             // The hologram card on a wrist in SteamVR, and which of the widget's looks it has.
             options.Rows.Add(new OptionsPanel.Row
