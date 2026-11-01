@@ -19,7 +19,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.4.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.4.1.0")]
 [assembly: System.Reflection.AssemblyTitle("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyProduct("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyCompany("Saosin LLC")]
@@ -154,10 +154,16 @@ namespace DinoVisualizer
 
         public static int S(int v) { return (int)Math.Round(v * Scale); }
 
-        // Letter-spaced text, drawn a character at a time (GDI text ignores alpha, so colors must be opaque).
-        // clip: keep to the Graphics clip region (GDI text ignores it otherwise), e.g. for scrolling text.
+        // Letter-spaced text (GDI text ignores alpha, so colors must be opaque). clip: keep to the Graphics clip
+        // region (GDI text ignores it otherwise), e.g. for scrolling text.
+        //
+        // Plain text goes out in one ExtTextOut call with each character's place given, which is many times quicker
+        // than a call per character. Anything the font may not have (symbols, other scripts) still goes a character
+        // at a time through DrawText, which finds those in other fonts.
         public static int DrawSpaced(Graphics g, string s, Font f, Color c, int x, int y, int spacing, bool clip = false)
         {
+            if (string.IsNullOrEmpty(s)) return 0;
+            if (s.Length > 1 && s.All(Plain)) return DrawSpacedFast(g, s, f, c, x, y, spacing, clip);
             int cx = x;
             var flags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | (clip ? TextFormatFlags.PreserveGraphicsClipping : 0);
             foreach (char ch in s)
@@ -168,6 +174,55 @@ namespace DinoVisualizer
             return cx - x;
         }
 
+        // Latin letters and the common punctuation, which the app's fonts all have.
+        static bool Plain(char ch) { return ch < 0x250 || (ch >= 0x2010 && ch <= 0x2026); }
+
+        [DllImport("gdi32.dll", CharSet = CharSet.Unicode)] static extern bool ExtTextOutW(IntPtr hdc, int x, int y, uint options, IntPtr rect, string text, uint count, int[] dx);
+        [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
+        [DllImport("gdi32.dll")] static extern int SetTextColor(IntPtr hdc, int color);
+        [DllImport("gdi32.dll")] static extern int SetBkMode(IntPtr hdc, int mode);
+        [DllImport("gdi32.dll")] static extern int SetTextAlign(IntPtr hdc, int align);
+        [DllImport("gdi32.dll")] static extern int SaveDC(IntPtr hdc);
+        [DllImport("gdi32.dll")] static extern bool RestoreDC(IntPtr hdc, int saved);
+        [DllImport("gdi32.dll")] static extern int ExtSelectClipRgn(IntPtr hdc, IntPtr region, int mode);
+        [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr obj);
+        static readonly Dictionary<Font, IntPtr> hfonts = new Dictionary<Font, IntPtr>();
+
+        static int DrawSpacedFast(Graphics g, string s, Font f, Color c, int x, int y, int spacing, bool clip)
+        {
+            var dx = new int[s.Length];
+            int total = 0;
+            for (int i = 0; i < s.Length; i++) total += dx[i] = CharWidth(g, s[i], f) + spacing;
+            IntPtr font;
+            if (!hfonts.TryGetValue(f, out font))
+            {
+                if (hfonts.Count > 64) { foreach (var h in hfonts.Values) DeleteObject(h); hfonts.Clear(); }   // only passing fonts pile up
+                hfonts[f] = font = f.ToHfont();
+            }
+            IntPtr region = IntPtr.Zero;
+            if (clip)
+                using (var r = g.Clip)
+                    if (!r.IsInfinite(g)) region = r.GetHrgn(g);
+            IntPtr hdc = g.GetHdc();
+            try
+            {
+                int saved = SaveDC(hdc);
+                if (region != IntPtr.Zero) ExtSelectClipRgn(hdc, region, 1);   // RGN_AND
+                SelectObject(hdc, font);
+                SetTextColor(hdc, ColorTranslator.ToWin32(c));
+                SetBkMode(hdc, 1);       // TRANSPARENT
+                SetTextAlign(hdc, 0);    // TA_TOP | TA_LEFT, as DrawText places it
+                ExtTextOutW(hdc, x, y, 0, IntPtr.Zero, s, (uint)s.Length, dx);
+                RestoreDC(hdc, saved);
+            }
+            finally
+            {
+                g.ReleaseHdc(hdc);
+                if (region != IntPtr.Zero) DeleteObject(region);
+            }
+            return total;
+        }
+
         public static int SpacedWidth(IDeviceContext g, string s, Font f, int spacing)
         {
             int w = 0;
@@ -175,11 +230,99 @@ namespace DinoVisualizer
             return w;
         }
 
+        // Measured once per font, character and kind of surface: measuring each character on every paint was a good
+        // part of what painting the window cost. The surface matters: measured on none at all (g null), a character
+        // comes out about twice as wide as on a real one, and a surface's DPI changes it too, so each keeps its own.
+        static readonly Dictionary<int, Dictionary<Font, Dictionary<char, int>>> widths = new Dictionary<int, Dictionary<Font, Dictionary<char, int>>>();
+
         public static int CharWidth(IDeviceContext g, char ch, Font f)
         {
+            var graphics = g as Graphics;
+            int surface = g == null ? -1 : graphics != null ? (int)Math.Round(graphics.DpiX) : 0;
+            Dictionary<Font, Dictionary<char, int>> fonts;
+            if (!widths.TryGetValue(surface, out fonts)) widths[surface] = fonts = new Dictionary<Font, Dictionary<char, int>>();
+            Dictionary<char, int> known;
+            if (!fonts.TryGetValue(f, out known)) fonts[f] = known = new Dictionary<char, int>();
+            int w;
+            if (known.TryGetValue(ch, out w)) return w;
             string t = ch == ' ' ? "a" : ch.ToString();
-            return g == null ? TextRenderer.MeasureText(t, f, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width
-                             : TextRenderer.MeasureText(g, t, f, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
+            w = g == null ? TextRenderer.MeasureText(t, f, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width
+                          : TextRenderer.MeasureText(g, t, f, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
+            known[ch] = w;
+            return w;
+        }
+    }
+
+    // A picture held by GDI (a DIB section in its own memory DC): drawn on with GDI+ through the DC, and stretched
+    // and copied with GDI's StretchBlt and BitBlt, which are far quicker than GDI+ for big opaque pictures.
+    sealed class GdiPicture : IDisposable
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        struct BitmapInfoHeader
+        {
+            public int Size, Width, Height;
+            public short Planes, BitCount;
+            public int Compression, SizeImage, XPels, YPels, ClrUsed, ClrImportant;
+        }
+
+        [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+        [DllImport("gdi32.dll")] static extern IntPtr CreateDIBSection(IntPtr hdc, ref BitmapInfoHeader info, uint usage, out IntPtr bits, IntPtr section, uint offset);
+        [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
+        [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr hdc);
+        [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr obj);
+        [DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, int rop);
+        [DllImport("gdi32.dll")] static extern bool StretchBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, int sw, int sh, int rop);
+        [DllImport("gdi32.dll")] static extern int SetStretchBltMode(IntPtr hdc, int mode);
+        [DllImport("gdi32.dll")] static extern bool SetBrushOrgEx(IntPtr hdc, int x, int y, IntPtr old);
+        const int SrcCopy = 0x00CC0020, ColorOnColor = 3, Halftone = 4;
+
+        public readonly int Width, Height;
+        readonly IntPtr dc, bitmap, old;
+
+        public GdiPicture(int width, int height)
+        {
+            Width = width;
+            Height = height;
+            var info = new BitmapInfoHeader { Size = Marshal.SizeOf(typeof(BitmapInfoHeader)), Width = width, Height = -height, Planes = 1, BitCount = 32 };
+            IntPtr bits;
+            dc = CreateCompatibleDC(IntPtr.Zero);
+            bitmap = CreateDIBSection(dc, ref info, 0, out bits, IntPtr.Zero, 0);
+            old = SelectObject(dc, bitmap);
+        }
+
+        // GDI+ drawing on it (dispose it before the picture is copied anywhere).
+        public Graphics Draw() { return Graphics.FromHdc(dc); }
+
+        // All of another picture stretched to fill this one, pixel for pixel (a smooth stretch took six times as long,
+        // and under the dimming and the panels' glass it looks the same).
+        public void StretchFrom(GdiPicture source)
+        {
+            SetStretchBltMode(dc, ColorOnColor);
+            StretchBlt(dc, 0, 0, Width, Height, source.dc, 0, 0, source.Width, source.Height, SrcCopy);
+        }
+
+        // Part of it (from) onto a GDI+ surface at to, stretched if the sizes differ.
+        public void CopyTo(Graphics g, Rectangle to, Rectangle from)
+        {
+            IntPtr target = g.GetHdc();
+            try
+            {
+                if (to.Size == from.Size) BitBlt(target, to.X, to.Y, to.Width, to.Height, dc, from.X, from.Y, SrcCopy);
+                else
+                {
+                    SetStretchBltMode(target, Halftone);
+                    SetBrushOrgEx(target, 0, 0, IntPtr.Zero);
+                    StretchBlt(target, to.X, to.Y, to.Width, to.Height, dc, from.X, from.Y, from.Width, from.Height, SrcCopy);
+                }
+            }
+            finally { g.ReleaseHdc(target); }
+        }
+
+        public void Dispose()
+        {
+            SelectObject(dc, old);
+            DeleteObject(bitmap);
+            DeleteDC(dc);
         }
     }
 
@@ -307,10 +450,10 @@ namespace DinoVisualizer
             }
         }
 
-        // The visualizer as the backdrop (Options: Visualizer Background): a picture the main window draws every frame
-        // (smaller than the window, so it's quick) and stretches behind everything in place of the scene. Null: the
-        // scene.
-        public static Bitmap Live;
+        // The visualizer as the backdrop (Options: Visualizer Background): a picture the main window makes every frame
+        // and each surface copies its part of, in place of the scene. Null: the scene. It's a GDI picture, copied
+        // with BitBlt (GDI+ was many times slower at the window's full size).
+        public static GdiPicture Live;
         public static Form LiveForm;
 
         public static void Paint(Graphics g, Control c)
@@ -323,14 +466,13 @@ namespace DinoVisualizer
             {
                 Point at = c == form ? Point.Empty : form.PointToClient(c.PointToScreen(Point.Empty));
                 var r = Rectangle.Ceiling(g.ClipBounds);
-                float kx = live.Width / (float)size.Width, ky = live.Height / (float)size.Height;
-                var mode = g.InterpolationMode;
-                var offset = g.PixelOffsetMode;
-                g.InterpolationMode = InterpolationMode.Bilinear;
-                g.PixelOffsetMode = PixelOffsetMode.Half;
-                g.DrawImage(live, r, new RectangleF((r.X + at.X) * kx, (r.Y + at.Y) * ky, r.Width * kx, r.Height * ky), GraphicsUnit.Pixel);
-                g.InterpolationMode = mode;
-                g.PixelOffsetMode = offset;
+                // Stretched only while the window changes size (until the next picture).
+                if (live.Width == size.Width && live.Height == size.Height) live.CopyTo(g, r, new Rectangle(r.X + at.X, r.Y + at.Y, r.Width, r.Height));
+                else
+                {
+                    float kx = live.Width / (float)size.Width, ky = live.Height / (float)size.Height;
+                    live.CopyTo(g, r, Rectangle.Round(new RectangleF((r.X + at.X) * kx, (r.Y + at.Y) * ky, r.Width * kx, r.Height * ky)));
+                }
                 return;
             }
             lock (sync)
@@ -1418,6 +1560,23 @@ namespace DinoVisualizer
             {
                 var row = Rows[i];
                 int step = Step(row, squeeze);
+                // A row out of sight (scrolled away, or outside what's being painted) is only placed, not drawn.
+                var clip = g.ClipBounds;
+                if (y + step < Math.Max(0, clip.Top) || y - Theme.S(16) > Math.Min(Height, clip.Bottom))
+                {
+                    if (row.Slider)
+                    {
+                        row.Track = new Rectangle(lx, y + Theme.S(34), rx - lx, Theme.S(12));
+                        row.Hit = new Rectangle(0, y + Theme.S(34) - Theme.S(14), Width, Theme.S(40));
+                    }
+                    else
+                    {
+                        if (row.Checked == null) row.Box = new Rectangle(rx - Theme.S(180), y - Theme.S(8), Theme.S(180), Theme.S(32));
+                        row.Hit = new Rectangle(0, y - Theme.S(14), Width, Theme.S(46));
+                    }
+                    y += step;
+                    continue;
+                }
                 bool hov = i == hover;
                 Color lc = hov ? Theme.Bright : Theme.Primary;
                 if (row.Slider)
@@ -10185,13 +10344,20 @@ namespace DinoVisualizer
         {
             Engine.Update(info.Playing ? level : 0);
             var a = VizArea;
-            if (ShowsViz && a.Width > 0 && a.Height > 0) Invalidate(Rectangle.Inflate(a, Theme.S(8), Theme.S(8)));
+            if (ShowsViz && !VizBehind && a.Width > 0 && a.Height > 0) Invalidate(Rectangle.Inflate(a, Theme.S(8), Theme.S(8)));
             if (!holoArea.IsEmpty) Invalidate(Rectangle.Inflate(holoArea, Theme.S(8), 0));   // the skull keeps turning (glitches shift it sideways)
             if (ShowsLyrics && a.Width > 0 && a.Height > 0 && StepLyrics()) Invalidate(a);
         }
 
         // Lyrics + Visualizer: the lyrics over the visualizer (dimmed behind them), on its tab and on the Lyrics tab.
         public bool LyricsWithViz;
+
+        // Visualizer Background is on: the visualizer is already behind the whole window, so the box shows that
+        // through clear glass instead of drawing it a second time (which at full size cost as much as everything else).
+        public bool VizBehind;
+
+        Bitmap artShown;   // the album art scaled to its square
+        Image artFrom;     // the picture it was scaled from
         bool ShowsViz { get { return Tab == VizTab || (Tab == LyricsTab && LyricsWithViz); } }
         bool ShowsLyrics { get { return Tab == LyricsTab || (Tab == VizTab && LyricsWithViz); } }
 
@@ -10209,6 +10375,9 @@ namespace DinoVisualizer
         {
             Engine.Release();
             skull.Release();
+            if (artShown != null) artShown.Dispose();
+            artShown = null;
+            artFrom = null;
             foreach (var p in secretPictures.Values) p.Dispose();
             secretPictures.Clear();
         }
@@ -10250,11 +10419,22 @@ namespace DinoVisualizer
             var art = new Rectangle(box.X + Theme.S(18), box.Y + Theme.S(18), side, side);
             if (info.Art != null)
             {
-                int s = Math.Min(info.Art.Width, info.Art.Height);
-                var mode = g.InterpolationMode;
-                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                g.DrawImage(info.Art, art, new Rectangle((info.Art.Width - s) / 2, (info.Art.Height - s) / 2, s, s), GraphicsUnit.Pixel);
-                g.InterpolationMode = mode;
+                // Scaled once (with care) for each song and size, then just copied: scaling it on every paint cost
+                // several milliseconds each time the visualizer moved.
+                if (artShown == null || artFrom != info.Art || artShown.Width != art.Width || artShown.Height != art.Height)
+                {
+                    if (artShown != null) artShown.Dispose();
+                    artShown = new Bitmap(Math.Max(1, art.Width), Math.Max(1, art.Height), PixelFormat.Format32bppPArgb);
+                    artFrom = info.Art;
+                    int s = Math.Min(info.Art.Width, info.Art.Height);
+                    using (var ag = Graphics.FromImage(artShown))
+                    {
+                        ag.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        ag.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                        ag.DrawImage(info.Art, new Rectangle(0, 0, art.Width, art.Height), new Rectangle((info.Art.Width - s) / 2, (info.Art.Height - s) / 2, s, s), GraphicsUnit.Pixel);
+                    }
+                }
+                g.DrawImageUnscaled(artShown, art.X, art.Y);
             }
             else DrawFootprint(g, art);
             UiDraw.Box(g, Rectangle.Inflate(art, Theme.S(1), Theme.S(1)), Theme.S(1), Theme.Faint);
@@ -10316,7 +10496,12 @@ namespace DinoVisualizer
             bool typing = false;   // the status box is on show
             if (vbox.Height > Theme.S(90))
             {
-                using (var b = new SolidBrush(Theme.Glass)) g.FillRectangle(b, vbox);
+                using (var b = new SolidBrush(Theme.Glass))
+                {
+                    if (VizBehind && Tab == VizTab && !LyricsWithViz)
+                        using (var glass = new Region(vbox)) { glass.Exclude(VizArea); g.FillRegion(b, glass); }   // the background shows clear in the middle
+                    else g.FillRectangle(b, vbox);
+                }
                 UiDraw.Box(g, vbox, Theme.S(2), Theme.Primary);
                 int tabX = vbox.X + Theme.S(18), tabY = vbox.Y + Theme.S(18);
                 // The tabs move closer together when the window is narrow; narrower still, the long names are
@@ -10370,7 +10555,7 @@ namespace DinoVisualizer
                     else if (Tab == StatusTab) typing = DrawStatus(g, area);
                     else
                     {
-                        if (ShowsViz)
+                        if (ShowsViz && !VizBehind)
                         {
                             var palette = ColorMix.Palette();
                             if (palette != null) Engine.DrawMulti(g, area, Style, Math.Max(1.5f, Theme.Scale * 2), palette);
@@ -11569,30 +11754,64 @@ namespace DinoVisualizer
         bool closeToTray, exiting, trayHintShown, minimized, startInTray;
 
         // The visualizer behind the whole window in place of the black scene (Visualizer Background), dimmed so the
-        // words over it read clearly. It's drawn at half the window's size and stretched, and the window waits at
-        // least as long as a frame took before drawing the next, so a slow computer stays responsive.
+        // words over it read clearly. It's drawn at half the window's size and stretched once to the full size (by
+        // GDI, which is quick at it), so each panel just copies its part.
+        //
+        // Each new frame repaints the whole window, so how often they come is governed by how busy that keeps the
+        // window's thread: up to 30 a second while it's under 55% busy, fewer once it's over 70%, so the buttons and
+        // lists stay quick to answer on any computer and at any window size.
         static readonly string[] BackNames = { "Off", "Dim", "Bright" };
         static readonly int[] BackDims = { 0, 145, 70 };    // how dark it's shaded (0..255)
         static readonly int[] GlassAlphas = { 200, 130, 130 };   // the panels' dark glass, lighter so it shows through
-        int backIdx;
-        Bitmap backPic;
-        DateTime nextBack;
+        int backIdx, backFrames;
+        GdiPicture backSmall, backPic;   // the visualizer at half size, and stretched to the window's
+        double backGap = 33, backMs, busy, lastCpu = -1;   // ms between frames; this thread's CPU share (0..1)
+        long nextBack, lastWall;                           // Stopwatch milliseconds
+        static readonly Stopwatch wall = Stopwatch.StartNew();
+
+        [DllImport("kernel32.dll")] static extern IntPtr GetCurrentThread();
+        [DllImport("kernel32.dll")] static extern bool GetThreadTimes(IntPtr thread, out long created, out long exited, out long kernel, out long user);
+
+        // The window's thread's CPU time so far, in ms.
+        static double ThreadCpu()
+        {
+            long created, exited, kernel, user;
+            return GetThreadTimes(GetCurrentThread(), out created, out exited, out kernel, out user) ? (kernel + user) / 10000.0 : 0;
+        }
 
         void StepBackground()
         {
-            if (Backdrop.Fast || DateTime.UtcNow < nextBack) return;   // while the edge is dragged, the last one stretches
+            // Twice a second: how busy the thread was, and the gap between frames adjusted to keep it about half busy.
+            long now = wall.ElapsedMilliseconds;
+            if (lastCpu < 0 || now - lastWall >= 500)
+            {
+                double cpu = ThreadCpu();
+                if (lastCpu >= 0)
+                {
+                    busy = (cpu - lastCpu) / Math.Max(1, now - lastWall);
+                    if (busy > 0.7) backGap = Math.Min(500, backGap * 1.3);
+                    else if (busy < 0.55) backGap = Math.Max(33, backGap * 0.85);
+                }
+                lastCpu = cpu;
+                lastWall = now;
+            }
+            if (Backdrop.Fast || now < nextBack) return;   // while the edge is dragged, the last one stretches
+            nextBack = now + (long)backGap - 16;           // (the frame timer ticks every 33 ms)
             var size = ClientSize;
-            int w = Math.Max(1, size.Width / 2), h = Math.Max(1, size.Height / 2);
+            if (size.Width < 2 || size.Height < 2) return;
+            int w = size.Width / 2, h = size.Height / 2;
             var clock = Stopwatch.StartNew();
-            if (backPic == null || backPic.Width != w || backPic.Height != h)
+            if (backPic == null || backPic.Width != size.Width || backPic.Height != size.Height)
             {
                 var old = backPic;
-                backPic = new Bitmap(w, h, PixelFormat.Format32bppPArgb);
+                if (backSmall != null) backSmall.Dispose();
+                backSmall = new GdiPicture(w, h);
+                backPic = new GdiPicture(size.Width, size.Height);
                 Backdrop.Live = backPic;
                 Backdrop.LiveForm = this;
                 if (old != null) old.Dispose();
             }
-            using (var g = Graphics.FromImage(backPic))
+            using (var g = backSmall.Draw())
             {
                 g.Clear(Color.FromArgb(9, 10, 12));
                 var r = new RectangleF(0, 0, w, h);
@@ -11602,9 +11821,10 @@ namespace DinoVisualizer
                 else page.Engine.Draw(g, r, vizStyle, unit, VizColors.Accent());
                 using (var b = new SolidBrush(Color.FromArgb(BackDims[backIdx], 4, 5, 8))) g.FillRectangle(b, 0, 0, w, h);
             }
+            backPic.StretchFrom(backSmall);
+            backMs = backMs * 0.8 + clock.Elapsed.TotalMilliseconds * 0.2;
+            backFrames++;
             Invalidate(true);
-            Update();
-            nextBack = DateTime.UtcNow.AddMilliseconds(clock.Elapsed.TotalMilliseconds);
         }
 
         // Back to the black scene (switched off, or the window put away).
@@ -11612,7 +11832,9 @@ namespace DinoVisualizer
         {
             Backdrop.Live = null;
             if (backPic != null) backPic.Dispose();
-            backPic = null;
+            if (backSmall != null) backSmall.Dispose();
+            backPic = backSmall = null;
+            lastCpu = -1;
         }
         readonly VrWrist wrist = new VrWrist();
 
@@ -11648,7 +11870,7 @@ namespace DinoVisualizer
             bottom = new BottomBar { Dock = DockStyle.Bottom };
             var frame = new FramePanel { Dock = DockStyle.Fill };
             options = new OptionsPanel { Dock = DockStyle.Right };
-            page = new VisualizerPage { Dock = DockStyle.Fill, Style = vizStyle, Tab = Clamp(Settings.Num("tab", 0), VisualizerPage.TabCount), LyricsWithViz = Settings.Num("lyricsviz", 0) != 0 };
+            page = new VisualizerPage { Dock = DockStyle.Fill, Style = vizStyle, Tab = Clamp(Settings.Num("tab", 0), VisualizerPage.TabCount), LyricsWithViz = Settings.Num("lyricsviz", 0) != 0, VizBehind = backIdx > 0 };
             YouTubeAccount.OpenInMusic = Settings.Num("ytmusic", 1) != 0;
             VrcChatbox.Port = (int)Settings.Num("vrcport", 9000);
             VrcChatbox.Mode = Clamp(Settings.Num("vrchat", 0), VrcChatbox.Names.Length);
@@ -11742,7 +11964,7 @@ namespace DinoVisualizer
                 StepColors();   // also while the window is hidden: the widget shows the colors too
                 // (Also while the window floats in VR, even with it put away here.)
                 if ((Visible && WindowState != FormWindowState.Minimized) || wrist.WindowOpen) page.Animate(watcher != null ? watcher.Level : 0);
-                if (backIdx > 0 && Visible && WindowState != FormWindowState.Minimized) StepBackground();
+                if (backIdx > 0 && ((Visible && WindowState != FormWindowState.Minimized) || wrist.WindowOpen)) StepBackground();
             };
             ui.Tick += (s, e) =>
             {
@@ -11890,13 +12112,14 @@ namespace DinoVisualizer
             });
             options.Rows.Add(new OptionsPanel.Row
             {
-                Label = "Visualizer Background:", Choices = BackNames, Current = () => backIdx,
+                Label = "Viz Background:", Choices = BackNames, Current = () => backIdx,
                 Choose = i =>
                 {
                     backIdx = i;
                     Settings.Set("vizbackground", i);
                     Theme.Glass = Color.FromArgb(GlassAlphas[i], Theme.Glass);
-                    nextBack = DateTime.MinValue;
+                    page.VizBehind = i > 0;
+                    nextBack = 0;
                     if (i == 0) DropBackground();
                     Invalidate(true);
                 }
