@@ -1,0 +1,6 @@
+# The built app goes on the GitHub release, not in the code.
+DinoVisualizer.exe
+DinoVisualizerTest.exe
+*.exe.old
+*.exe.download
+_updtest/
