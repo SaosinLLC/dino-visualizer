@@ -252,6 +252,7 @@ Technical details:
   - It's the "Dino Visualizer" entry in your user's startup list (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`), so it also shows in Task Manager's Startup apps.
   - If you move the app's folder, open the app once from the new place and the entry follows it.
 - **VRChat Chatbox**: *Off*, *Song*, *Song + Time*, *Song + Progress Bar*, or any of those with the lyrics. It shows what's playing above your head in VRChat (see [VRChat chatbox](#vrchat-chatbox)).
+- **VR Wrist** and **VR Wrist Look**: the hologram card on your wrist in SteamVR (see [VR wrist](#vr-wrist-steamvr)).
 - **Chatbox Adlibs**: how background vocals and adlibs look in the chatbox's lyrics: *Tiny*, *Small Caps*, *Normal* or *Hidden*.
 - **Chatbox Bar**: how the chatbox's progress bar looks. There are 15 styles, from *Line* to *Hash*; each choice in the list shows a sample.
 - **Scanlines**, **Color Preset**, **Accent Hue**, **Accent Saturation**: the same look controls as Dino Monitor.
@@ -270,6 +271,36 @@ Options are remembered between launches in `%AppData%\Dino Visualizer\settings.i
 - Windows doesn't let apps read a player's actual frequencies, so the visualizers follow the player's loudness meter about 30 times a second, spread over a moving pattern.
 - Dino Recorder has its own copy of the widget. If both apps are running, only the first one started gets `Ctrl+F11`.
 - Memory: the app keeps only what's on screen. The window's backdrop is held at the window's own size, the Earth's NASA maps are loaded at just the detail the planet needs and let go when no Earth is showing, and album art is kept no bigger than it's shown. With the window hidden in the tray or minimized, its backdrop and pictures are let go too (they're made again in a moment when it's shown). Now and then (and right after anything big), unused memory is handed back to Windows.
+
+## VR wrist (SteamVR)
+
+In SteamVR, a hologram of the Now Playing card can sit on your wrist. Turn your wrist toward your face to see it, then point at its buttons with your other hand and pull the trigger to skip back, play or pause, or skip ahead. Turning your wrist toward your face twice quickly opens Dino Visualizer's whole window floating in front of you.
+
+To set it up, pick a wrist in **VR Wrist** in Options: *Left Wrist (Inside)*, *Left Wrist (Outside)*, *Right Wrist (Inside)* or *Right Wrist (Outside)*.
+- **Inside** is the palm side of your wrist; **outside** is the back of it, where a watch goes.
+- The top bar says *VR Wrist: Waiting For SteamVR* until SteamVR is running, then *VR Wrist: On*.
+- It never starts SteamVR itself. It connects when SteamVR is running and lets go when SteamVR closes.
+
+**VR Wrist Look** picks which of the widget's looks the hologram has: *Dino*, *Windows*, *Aero*, *XP* or *Orb*.
+- Each look is drawn see-through and glowing in your accent color.
+- Dark parts fade away, and there are scanlines, a slight flicker, a band of light sweeping down it, and the odd glitch.
+- The XP and Orb looks' visualizers move with the music, as on the desktop.
+
+How to use it:
+- **Show it**: turn the chosen side of your wrist toward your face. It fades in within about 40 degrees of facing you, and fades out once you turn it well away.
+- **Press a button**: point your other controller at the card. SteamVR's laser beam comes out of it, the button under the beam lights up, and pulling the trigger presses it (Previous, Play/Pause, Next).
+  - While the card is showing, your controllers point at it instead of the game; that ends when you turn your wrist away.
+- **Open the app's window in VR**: turn your wrist toward your face twice within about a second (show it, turn away, show it again).
+  - Dino Visualizer's window appears about 80 cm in front of where you're looking, a meter wide, even while it's put away in the tray on the desktop.
+  - It's live: the visualizer, lyrics and everything else move, redrawn about 6 times a second.
+  - Point at anything with the laser and pull the trigger to click it: tabs, player buttons, options, drop-downs. Sliders drag while the trigger's held, and the thumbstick scrolls lyrics, lists and the Options panel.
+  - Close it with the **✕** on its bar, or with the same double turn.
+
+**Fine-tuning:** controllers differ, so if it sits in an odd spot, you can move or resize it in `%AppData%\Dino Visualizer\settings.ini` (with the app closed):
+- `vrwristx`, `vrwristy` and `vrwristz` move it, in meters. Use `x` for left/right, `y` for up/down, and `z` toward your elbow (positive) or hand (negative), as the controller sees it.
+- `vrwristsize` is its width in meters (default `0.17`).
+
+**How it works:** it uses SteamVR's own `openvr_api.dll` from your SteamVR folder, so nothing extra is installed. The card and the window are handed to SteamVR as textures on your graphics card (Direct3D 11) that are updated in place, so they don't flicker. The card is updated about 16 times a second while it's showing, and nothing is drawn while it's hidden. It sits up your forearm, clear of the controller, since SteamVR draws controllers in front of overlays. The laser is SteamVR's own (the same as in its dashboard), turned on for the card and the window only while they're showing.
 
 ## Updates
 
@@ -316,3 +347,5 @@ The Earth visualizer's maps are NASA imagery, credit **NASA Earth Observatory**:
 - `BlackMarble_2016_01deg_gray.jpg`: Black Marble 2016 night lights (Suomi NPP VIIRS).
 
 All three come from NASA's image server (eoimages.gsfc.nasa.gov) and are used under NASA's media guidelines.
+
+The VR wrist talks to SteamVR using function layouts from Valve's OpenVR SDK (`openvr_api.cs`, github.com/ValveSoftware/openvr, BSD-3-Clause license, Copyright (c) 2015, Valve Corporation).

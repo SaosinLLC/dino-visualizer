@@ -19,7 +19,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.0.3.0")]
+[assembly: System.Reflection.AssemblyVersion("1.1.0.0")]
 [assembly: System.Reflection.AssemblyTitle("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyProduct("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyCompany("Saosin LLC")]
@@ -1236,6 +1236,13 @@ namespace DinoVisualizer
             int y = Theme.S(72);
             for (int i = 0; i < Rows.Count - 1; i++) y += Step(Rows[i], k);
             return Math.Max(0, y + (Rows[Rows.Count - 1].Slider ? Theme.S(58) : Theme.S(30)) - Height);
+        }
+
+        // A wheel message sent straight here (the VR laser's thumbstick) scrolls too.
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            base.OnMouseWheel(e);
+            ScrollBy(-e.Delta * Theme.S(56) / 120);
         }
 
         void ScrollBy(int dy)
@@ -4054,6 +4061,35 @@ namespace DinoVisualizer
             Invalidate();
         }
 
+        // ---- For the VR wrist, which keeps a card of its own that's never shown: the card drawn into a picture
+        // (see-through round the Aero, XP and Orb shapes, on black for the others), the part of it that's the card,
+        // which player button is at a point (0 previous, 1 play/pause, 2 next, -1 none), and the finger over or on one.
+        public Bitmap Snapshot()
+        {
+            var bmp = new Bitmap(Width, Height, PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                if (!Layered) g.Clear(Color.Black);
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                if (xp) PaintXp(g);
+                else if (orb) PaintOrb(g);
+                else if (aero) PaintAero(g);
+                else OnPaint(new PaintEventArgs(g, ClientRectangle));
+            }
+            return bmp;
+        }
+
+        public Rectangle CardArea { get { return win ? WinRight : ClientRectangle; } }
+
+        public int PlayerButtonAt(Point p) { return win ? WinButtonAt(p) : ButtonAt(p); }
+
+        public int HoverButton { get { return hoverButton; } set { hoverButton = value; } }
+
+        public void Press(int b) { PressButton(b); }
+
         // Corners resize, the bars and buttons do their job, and only the middle (art, title, artist) moves the card
         // (it has no title bar and never takes focus).
         protected override void OnMouseDown(MouseEventArgs e)
@@ -4260,6 +4296,901 @@ namespace DinoVisualizer
         {
             base.OnMouseWheel(e);
             card.PanelWheel(e);
+        }
+    }
+
+    // ------------------------------------------------------------------ VR wrist (SteamVR)
+
+    // Talks to SteamVR through Valve's OpenVR library, loaded from SteamVR's own folder (so nothing extra ships with
+    // the app). Only the few calls the wrist needs are here: entries of the IVRSystem_026 and IVROverlay_028 function
+    // tables, at the positions Valve's openvr_api.cs gives them (github.com/ValveSoftware/openvr, BSD-3 license).
+    static class OpenVr
+    {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr LoadLibrary(string path);
+        [DllImport("openvr_api", EntryPoint = "VR_InitInternal2", CallingConvention = CallingConvention.Cdecl)]
+        static extern uint InitInternal2(ref int error, int type, [MarshalAs(UnmanagedType.LPStr)] string startupInfo);
+        [DllImport("openvr_api", EntryPoint = "VR_ShutdownInternal", CallingConvention = CallingConvention.Cdecl)]
+        static extern void ShutdownInternal();
+        [DllImport("openvr_api", EntryPoint = "VR_GetGenericInterface", CallingConvention = CallingConvention.Cdecl)]
+        static extern IntPtr GetGenericInterface([MarshalAs(UnmanagedType.LPStr)] string version, ref int error);
+
+        // HmdMatrix34_t: a 3 x 4 matrix, row by row (rotation in the first three columns, position in the last).
+        [StructLayout(LayoutKind.Sequential)]
+        public struct Matrix34 { public float M0, M1, M2, M3, M4, M5, M6, M7, M8, M9, M10, M11; }
+
+        // TrackedDevicePose_t.
+        [StructLayout(LayoutKind.Sequential)]
+        public struct Pose
+        {
+            public Matrix34 DeviceToAbsolute;
+            public float VX, VY, VZ, AX, AY, AZ;
+            public int TrackingResult;
+            [MarshalAs(UnmanagedType.I1)] public bool Valid;
+            [MarshalAs(UnmanagedType.I1)] public bool Connected;
+        }
+
+        // VREvent_t (64 bytes on Windows; only its type is read).
+        [StructLayout(LayoutKind.Sequential)]
+        public struct Event { public uint Type, Device; public float Age; public ulong D0, D1, D2, D3, D4, D5; }
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate void GetPosesFn(int origin, float predict, [In, Out] Pose[] poses, uint count);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate uint RoleIndexFn(int role);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] [return: MarshalAs(UnmanagedType.I1)] public delegate bool PollEventFn(ref Event e, uint size);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate void HapticFn(uint device, uint axis, ushort microseconds);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate void AckQuitFn();
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int CreateOverlayFn(IntPtr key, IntPtr name, ref ulong handle);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int OverlayFn(ulong handle);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int OverlayFloatFn(ulong handle, float value);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int OverlayUIntFn(ulong handle, uint value);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int RelativeFn(ulong handle, uint device, ref Matrix34 transform);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int RawFn(ulong handle, IntPtr buffer, uint width, uint height, uint bytesPerPixel);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int FlagFn(ulong handle, int flag, [MarshalAs(UnmanagedType.I1)] bool on);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int AbsoluteFn(ulong handle, int origin, ref Matrix34 transform);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] [return: MarshalAs(UnmanagedType.I1)] public delegate bool PollOverlayEventFn(ulong handle, ref Event e, uint size);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int MouseScaleFn(ulong handle, ref Vector2 scale);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int FromFileFn(ulong handle, IntPtr path);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int TextureFn(ulong handle, ref Texture texture);
+
+        // Texture_t: a Direct3D 11 texture (type 0) in gamma color space (1), as GDI draws.
+        [StructLayout(LayoutKind.Sequential)]
+        public struct Texture { public IntPtr Handle; public int Type, ColorSpace; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct Vector2 { public float X, Y; }
+
+        public static GetPosesFn GetPoses;
+        public static RoleIndexFn RoleIndex;
+        public static PollEventFn PollEvent;
+        public static HapticFn Haptic;
+        public static AckQuitFn AckQuit;
+        public static CreateOverlayFn CreateOverlay;
+        public static OverlayFn DestroyOverlay, ShowOverlay, HideOverlay;
+        public static OverlayFloatFn SetAlpha, SetWidth;
+        public static OverlayUIntFn SetSortOrder, SetInputMethod;
+        public static RelativeFn SetRelative;
+        public static RawFn SetRaw;
+        public static FlagFn SetFlag;
+        public static AbsoluteFn SetAbsolute;
+        public static PollOverlayEventFn PollOverlayEvent;
+        public static MouseScaleFn SetMouseScale;
+        public static FromFileFn SetFromFile;
+        public static TextureFn SetTexture;
+
+        // Raw pixels sent straight to an overlay have to stay under a size SteamVR sets (it turns down bigger ones and
+        // keeps the last picture); bigger pictures go as an image file instead.
+        public const int RawLimit = 380 * 1024;
+
+        // Shows a picture file on an overlay (the path as UTF-8).
+        public static int FromFile(ulong handle, string path)
+        {
+            var bytes = System.Text.Encoding.UTF8.GetBytes(path + "\0");
+            IntPtr p = Marshal.AllocHGlobal(bytes.Length);
+            try { Marshal.Copy(bytes, 0, p, bytes.Length); return SetFromFile(handle, p); }
+            finally { Marshal.FreeHGlobal(p); }
+        }
+
+        public const uint NoDevice = 0xFFFFFFFF, Hmd = 0, MaxDevices = 64;
+        public const int LeftHand = 1, RightHand = 2, Standing = 1, QuitEvent = 700;
+        public const uint MouseMove = 300, MouseDown = 301, MouseUp = 302, ScrollSmooth = 309, LeftButton = 1;
+        // The laser from the other hand points at an overlay with this while it's visible (no dashboard needed), and
+        // it gets smooth scroll events from the thumbstick.
+        public const int InteractiveIfVisible = 65536, SmoothScroll = 131072, MouseInput = 1;
+
+        // The x and y of a mouse or scroll event (VREvent_Mouse_t / VREvent_Scroll_t: two floats first).
+        public static float First(Event e) { return BitConverter.ToSingle(BitConverter.GetBytes(e.D0), 0); }
+        public static float Second(Event e) { return BitConverter.ToSingle(BitConverter.GetBytes(e.D0), 4); }
+        public static uint Button(Event e) { return (uint)(e.D1 & 0xFFFFFFFF); }
+        public static bool Running;
+        static bool loaded;
+
+        // openvr_api.dll in SteamVR's folder, found through the paths file SteamVR keeps for apps.
+        public static string Library()
+        {
+            try
+            {
+                string file = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "openvr", "openvrpaths.vrpath");
+                var runtime = Web.At(Web.Json(File.ReadAllText(file)), "runtime", 0) as string;
+                string dll = Path.Combine(runtime, "bin", IntPtr.Size == 8 ? "win64" : "win32", "openvr_api.dll");
+                return File.Exists(dll) ? dll : null;
+            }
+            catch { return null; }
+        }
+
+        public static bool SteamVrRunning { get { var p = Process.GetProcessesByName("vrserver"); foreach (var x in p) x.Dispose(); return p.Length > 0; } }
+
+        static T Fn<T>(IntPtr table, int index) where T : class
+        {
+            return (T)(object)Marshal.GetDelegateForFunctionPointer(Marshal.ReadIntPtr(table, index * IntPtr.Size), typeof(T));
+        }
+
+        // Connects as an overlay app. Only called while SteamVR is running: SteamVR is never started from here.
+        public static bool Start()
+        {
+            if (Running) return true;
+            try
+            {
+                if (!loaded)
+                {
+                    string dll = Library();
+                    if (dll == null || LoadLibrary(dll) == IntPtr.Zero) return false;
+                    loaded = true;
+                }
+                int error = 0;
+                InitInternal2(ref error, 2, null);   // VRApplication_Overlay
+                if (error != 0) return false;
+                IntPtr system = GetGenericInterface("FnTable:IVRSystem_026", ref error);
+                IntPtr overlay = error == 0 ? GetGenericInterface("FnTable:IVROverlay_028", ref error) : IntPtr.Zero;
+                if (error != 0 || system == IntPtr.Zero || overlay == IntPtr.Zero) { ShutdownInternal(); return false; }
+                GetPoses = Fn<GetPosesFn>(system, 12);
+                RoleIndex = Fn<RoleIndexFn>(system, 18);
+                PollEvent = Fn<PollEventFn>(system, 30);
+                Haptic = Fn<HapticFn>(system, 39);
+                AckQuit = Fn<AckQuitFn>(system, 47);
+                CreateOverlay = Fn<CreateOverlayFn>(overlay, 1);
+                DestroyOverlay = Fn<OverlayFn>(overlay, 3);
+                SetAlpha = Fn<OverlayFloatFn>(overlay, 16);
+                SetSortOrder = Fn<OverlayUIntFn>(overlay, 20);
+                SetWidth = Fn<OverlayFloatFn>(overlay, 22);
+                SetRelative = Fn<RelativeFn>(overlay, 35);
+                ShowOverlay = Fn<OverlayFn>(overlay, 43);
+                HideOverlay = Fn<OverlayFn>(overlay, 44);
+                SetRaw = Fn<RawFn>(overlay, 62);
+                SetFlag = Fn<FlagFn>(overlay, 11);
+                SetAbsolute = Fn<AbsoluteFn>(overlay, 33);
+                PollOverlayEvent = Fn<PollOverlayEventFn>(overlay, 48);
+                SetInputMethod = Fn<OverlayUIntFn>(overlay, 50);
+                SetMouseScale = Fn<MouseScaleFn>(overlay, 52);
+                SetFromFile = Fn<FromFileFn>(overlay, 63);
+                SetTexture = Fn<TextureFn>(overlay, 60);
+                Running = true;
+                return true;
+            }
+            catch { return false; }
+        }
+
+        public static void Stop()
+        {
+            if (!Running) return;
+            Running = false;
+            try { ShutdownInternal(); } catch { }
+        }
+    }
+
+    // Pictures for SteamVR as Direct3D 11 textures on the graphics card. Each overlay keeps one, has its pixels
+    // replaced in place and hands it to SteamVR again, which is smooth at any rate. (Sending raw pixels or a picture
+    // file instead makes SteamVR build a new texture every time, and the overlay flickers while it does.) The device
+    // and textures are reached through their COM function tables, as the media controls are.
+    static class Gpu
+    {
+        [DllImport("d3d11.dll")]
+        static extern int D3D11CreateDevice(IntPtr adapter, int driverType, IntPtr software, uint flags, IntPtr featureLevels, uint levels, uint sdkVersion,
+                                            out IntPtr device, out int featureLevel, out IntPtr context);
+
+        // D3D11_TEXTURE2D_DESC.
+        [StructLayout(LayoutKind.Sequential)]
+        struct TextureDesc { public uint Width, Height, MipLevels, ArraySize; public int Format; public uint SampleCount, SampleQuality; public int Usage; public uint BindFlags, CpuAccessFlags, MiscFlags; }
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int CreateTexture2DFn(IntPtr self, ref TextureDesc desc, IntPtr initialData, out IntPtr texture);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate void UpdateSubresourceFn(IntPtr self, IntPtr resource, uint subresource, IntPtr box, IntPtr data, uint rowPitch, uint depthPitch);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate void FlushFn(IntPtr self);
+
+        const int Hardware = 1, BgraSupport = 0x20, SdkVersion = 7, Bgra = 87, ShaderResource = 8;
+        const int CreateTexture2DSlot = 5, UpdateSubresourceSlot = 48, FlushSlot = 111;   // ID3D11Device / ID3D11DeviceContext
+        static IntPtr device, context;
+        static bool tried;
+
+        static T Slot<T>(IntPtr obj, int index) where T : class
+        {
+            return (T)(object)Marshal.GetDelegateForFunctionPointer(Marshal.ReadIntPtr(Marshal.ReadIntPtr(obj), index * IntPtr.Size), typeof(T));
+        }
+
+        // A Direct3D 11 device on the main graphics card (made the first time it's wanted).
+        public static bool Ready
+        {
+            get
+            {
+                if (!tried)
+                {
+                    tried = true;
+                    try
+                    {
+                        int level;
+                        if (D3D11CreateDevice(IntPtr.Zero, Hardware, IntPtr.Zero, BgraSupport, IntPtr.Zero, 0, SdkVersion, out device, out level, out context) < 0)
+                            device = context = IntPtr.Zero;
+                    }
+                    catch { device = context = IntPtr.Zero; }
+                }
+                return device != IntPtr.Zero;
+            }
+        }
+
+        // A texture of that size in the BGRA layout GDI draws in (zero if it can't be made).
+        public static IntPtr Texture(int width, int height)
+        {
+            if (!Ready) return IntPtr.Zero;
+            var desc = new TextureDesc { Width = (uint)width, Height = (uint)height, MipLevels = 1, ArraySize = 1, Format = Bgra, SampleCount = 1, BindFlags = ShaderResource };
+            IntPtr texture;
+            return Slot<CreateTexture2DFn>(device, CreateTexture2DSlot)(device, ref desc, IntPtr.Zero, out texture) < 0 ? IntPtr.Zero : texture;
+        }
+
+        // New pixels for a texture: BGRA rows, top first, rowPitch bytes apart.
+        public static void Update(IntPtr texture, IntPtr pixels, int rowPitch)
+        {
+            Slot<UpdateSubresourceFn>(context, UpdateSubresourceSlot)(context, texture, 0, IntPtr.Zero, pixels, (uint)rowPitch, 0);
+            Slot<FlushFn>(context, FlushSlot)(context);
+        }
+
+        public static void Release(ref IntPtr texture)
+        {
+            if (texture != IntPtr.Zero) Marshal.Release(texture);
+            texture = IntPtr.Zero;
+        }
+    }
+
+    // A Now Playing card as a hologram on one wrist in SteamVR. It's on the inside or the outside of the wrist, and
+    // fades in when that side is turned toward your face (and out when it's turned away). While it shows, SteamVR's own
+    // laser comes from the other hand when it points at it: the button under the beam lights up and the trigger presses
+    // it. The card is any of the widget's looks, drawn by a copy of the widget that's never shown, then turned into a
+    // see-through glowing projection in the accent color: bright parts glow, dark parts fade to nothing, with
+    // scanlines, a flicker and a band of light sweeping down it.
+    //
+    // Turning the wrist toward your face twice quickly opens Dino Visualizer's own window floating in front of you (and
+    // twice again closes it): a live picture of it, which the laser clicks, drags and scrolls like a mouse.
+    sealed class VrWrist : IDisposable
+    {
+        public static readonly string[] Names = { "Off", "Left Wrist (Inside)", "Left Wrist (Outside)", "Right Wrist (Inside)", "Right Wrist (Outside)" };
+        public static readonly string[] Looks = { "Dino Style", "Windows Style", "Aero Style", "XP Style", "Orb Style" };
+        public event Action<int> Command;   // a MediaWatcher command for the player
+        public event Action Changed;        // connected to SteamVR or not
+        public Func<float> LevelSource;
+        public Form App;                    // the main window, shown floating in VR on the double turn
+        public float Width = 0.17f, OffsetX, OffsetY, OffsetZ;   // meters (settings.ini: vrwristsize, vrwristx/y/z)
+
+        readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 22 };
+        readonly OpenVr.Pose[] poses = new OpenVr.Pose[OpenVr.MaxDevices];
+        readonly Stopwatch clock = Stopwatch.StartNew();
+        NowPlayingInfo info = new NowPlayingInfo();
+        NowPlayingWidget card;
+        int place, look, visualizer;
+        ulong overlay, window;
+        uint attached = OpenVr.NoDevice;
+        float alpha;              // 0 hidden .. 1 shown
+        bool facing, shown;
+        DateTime nextTry, nextFrame, lastRaise;
+        IntPtr buffer;
+        int bufferSize, texWidth = 1, texHeight = 1;
+
+        public VrWrist() { timer.Tick += (s, e) => Tick(); }
+
+        public bool Connected { get { return overlay != 0; } }
+
+        public int Place
+        {
+            get { return place; }
+            set
+            {
+                place = value;
+                attached = OpenVr.NoDevice;   // placed again on the next frame
+                if (place == 0) { Disconnect(); timer.Stop(); }
+                else { nextTry = DateTime.MinValue; timer.Start(); }
+            }
+        }
+
+        public int Look
+        {
+            get { return look; }
+            set { look = value; if (card != null) card.Style = value; }
+        }
+
+        public int Visualizer { set { visualizer = value; if (card != null) card.Visualizer = value; } }
+
+        public void SetInfo(NowPlayingInfo next)
+        {
+            info = next;
+            if (card != null) card.SetInfo(next);
+        }
+
+        // About 45 times a second while it's on. Until SteamVR turns up it only looks for it every 3 seconds.
+        void Tick()
+        {
+            if (place == 0) return;
+            try
+            {
+                if (!Connected)
+                {
+                    if (DateTime.UtcNow < nextTry) return;
+                    nextTry = DateTime.UtcNow.AddSeconds(3);
+                    if (OpenVr.SteamVrRunning && OpenVr.Start()) Connect();
+                    return;
+                }
+                // SteamVR closing: let it go, and look for it again later.
+                var e = new OpenVr.Event();
+                uint size = (uint)Marshal.SizeOf(typeof(OpenVr.Event));
+                while (OpenVr.PollEvent(ref e, size))
+                    if (e.Type == OpenVr.QuitEvent)
+                    {
+                        try { OpenVr.AckQuit(); } catch { }
+                        Disconnect();
+                        nextTry = DateTime.UtcNow.AddSeconds(10);
+                        return;
+                    }
+                // (Listing the processes takes a moment, so SteamVR having gone without a word is looked for rarely.)
+                if (DateTime.UtcNow >= nextTry)
+                {
+                    nextTry = DateTime.UtcNow.AddSeconds(10);
+                    if (!OpenVr.SteamVrRunning) { Disconnect(); return; }
+                }
+                Step();
+            }
+            catch { Disconnect(); nextTry = DateTime.UtcNow.AddSeconds(10); }
+        }
+
+        void Connect()
+        {
+            IntPtr key = Marshal.StringToHGlobalAnsi("saosinllc.dinovisualizer.wrist"), name = Marshal.StringToHGlobalAnsi("Dino Visualizer Wrist");
+            int error;
+            try { error = OpenVr.CreateOverlay(key, name, ref overlay); }
+            finally { Marshal.FreeHGlobal(key); Marshal.FreeHGlobal(name); }
+            if (error != 0) { overlay = 0; OpenVr.Stop(); return; }
+            OpenVr.SetWidth(overlay, Width);
+            OpenVr.SetSortOrder(overlay, 10);
+            OpenVr.SetAlpha(overlay, 0);
+            Pointable(overlay);
+            alpha = 0;
+            shown = facing = false;
+            attached = OpenVr.NoDevice;
+            card = new NowPlayingWidget(1.2f, look) { LevelSource = LevelSource, Visualizer = visualizer };
+            card.Command += slot => { if (Command != null) Command(slot); };
+            card.SetInfo(info);
+            // The app's window, for the double turn (hidden until then).
+            key = Marshal.StringToHGlobalAnsi("saosinllc.dinovisualizer.window");
+            name = Marshal.StringToHGlobalAnsi("Dino Visualizer");
+            try { if (OpenVr.CreateOverlay(key, name, ref window) != 0) window = 0; }
+            finally { Marshal.FreeHGlobal(key); Marshal.FreeHGlobal(name); }
+            if (window != 0)
+            {
+                OpenVr.SetWidth(window, WindowWidth);
+                OpenVr.SetSortOrder(window, 5);
+                Pointable(window);
+            }
+            windowOpen = false;
+            if (Changed != null) Changed();
+        }
+
+        // SteamVR's laser comes from the other hand when it points at the overlay while it's visible, and its trigger,
+        // moves and thumbstick scrolling come back as mouse events.
+        static void Pointable(ulong handle)
+        {
+            OpenVr.SetInputMethod(handle, OpenVr.MouseInput);
+            OpenVr.SetFlag(handle, OpenVr.InteractiveIfVisible, true);
+            OpenVr.SetFlag(handle, OpenVr.SmoothScroll, true);
+        }
+
+        void Disconnect()
+        {
+            bool was = Connected;
+            ReleaseWindowMouse();
+            if (overlay != 0) try { OpenVr.DestroyOverlay(overlay); } catch { }
+            if (window != 0) try { OpenVr.DestroyOverlay(window); } catch { }
+            overlay = window = 0;
+            windowOpen = false;
+            OpenVr.Stop();
+            if (card != null) card.Dispose();
+            card = null;
+            if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+            buffer = IntPtr.Zero;
+            bufferSize = 0;
+            Gpu.Release(ref cardTexture);
+            Gpu.Release(ref windowTexture);
+            ReleaseWindowPictures();
+            if (was && Changed != null) Changed();
+        }
+
+        public void Dispose()
+        {
+            timer.Stop();
+            Disconnect();
+            timer.Dispose();
+        }
+
+        // ---- Where it sits. In the controller's space +X is right, +Y up and -Z where it points. The card is 19 cm
+        // behind the controller's middle and 5 cm out from it, up the forearm past the controller's base and strap
+        // (SteamVR draws the controllers in front of overlays, and closer in an Index controller covered it). It faces
+        // out from the chosen side of the wrist, with its text running along the arm.
+        //
+        // The card's top points the way the controller's bottom does (-Y): that's what reads right way up when the wrist
+        // is turned toward your face, on either side of it (tried in VR on both).
+        public static OpenVr.Matrix34 Mount(int place, float dx, float dy, float dz)
+        {
+            // Facing +X: the inside of the left wrist or the outside of the right one; facing -X: the other two.
+            bool plusX = place == 1 || place == 4;
+            float s = plusX ? 1 : -1;
+            // Columns: the card's right (along the arm), its up (-Y) and its face (±X).
+            return new OpenVr.Matrix34
+            {
+                M0 = 0, M1 = 0, M2 = s, M3 = s * 0.05f + dx,
+                M4 = 0, M5 = -1, M6 = 0, M7 = -0.01f + dy,
+                M8 = s, M9 = 0, M10 = 0, M11 = 0.19f + dz
+            };
+        }
+
+        public static OpenVr.Matrix34 Multiply(OpenVr.Matrix34 a, OpenVr.Matrix34 b)
+        {
+            return new OpenVr.Matrix34
+            {
+                M0 = a.M0 * b.M0 + a.M1 * b.M4 + a.M2 * b.M8, M1 = a.M0 * b.M1 + a.M1 * b.M5 + a.M2 * b.M9,
+                M2 = a.M0 * b.M2 + a.M1 * b.M6 + a.M2 * b.M10, M3 = a.M0 * b.M3 + a.M1 * b.M7 + a.M2 * b.M11 + a.M3,
+                M4 = a.M4 * b.M0 + a.M5 * b.M4 + a.M6 * b.M8, M5 = a.M4 * b.M1 + a.M5 * b.M5 + a.M6 * b.M9,
+                M6 = a.M4 * b.M2 + a.M5 * b.M6 + a.M6 * b.M10, M7 = a.M4 * b.M3 + a.M5 * b.M7 + a.M6 * b.M11 + a.M7,
+                M8 = a.M8 * b.M0 + a.M9 * b.M4 + a.M10 * b.M8, M9 = a.M8 * b.M1 + a.M9 * b.M5 + a.M10 * b.M9,
+                M10 = a.M8 * b.M2 + a.M9 * b.M6 + a.M10 * b.M10, M11 = a.M8 * b.M3 + a.M9 * b.M7 + a.M10 * b.M11 + a.M11
+            };
+        }
+
+        // How squarely the card faces the head (1 straight at it, 0 edge on, below 0 away) and how far away it is.
+        public static float FacingHead(OpenVr.Matrix34 card, OpenVr.Matrix34 head, out float distance)
+        {
+            float dx = head.M3 - card.M3, dy = head.M7 - card.M7, dz = head.M11 - card.M11;
+            distance = (float)Math.Sqrt(dx * dx + dy * dy + dz * dz);
+            return distance < 1e-4f ? 0 : (card.M2 * dx + card.M6 * dy + card.M10 * dz) / distance;
+        }
+
+        void Step()
+        {
+            OpenVr.GetPoses(OpenVr.Standing, 0.02f, poses, OpenVr.MaxDevices);
+            Pointing();
+            if (windowOpen && DateTime.UtcNow >= nextWindowFrame)
+            {
+                var took = Stopwatch.StartNew();
+                UploadWindow();
+                nextWindowFrame = DateTime.UtcNow.AddMilliseconds(Math.Max(200, took.Elapsed.TotalMilliseconds * 3));
+            }
+            uint hand = OpenVr.RoleIndex(place <= 2 ? OpenVr.LeftHand : OpenVr.RightHand);
+            if (hand >= OpenVr.MaxDevices || !poses[hand].Valid || !poses[OpenVr.Hmd].Valid) { Fade(false); return; }
+            var mount = Mount(place, OffsetX, OffsetY, OffsetZ);
+            if (hand != attached)
+            {
+                OpenVr.SetRelative(overlay, hand, ref mount);
+                attached = hand;
+            }
+            var world = Multiply(poses[hand].DeviceToAbsolute, mount);
+            float distance, toward = FacingHead(world, poses[OpenVr.Hmd].DeviceToAbsolute, out distance);
+            // Turned toward the face: within about 40 degrees to show, and it stays until past about 55. Turned toward
+            // it twice within 1.2 seconds opens or closes the app's window.
+            bool was = facing;
+            facing = facing ? toward > 0.57f && distance < 1.0f : toward > 0.77f && distance < 0.85f;
+            if (facing && !was)
+            {
+                if ((DateTime.UtcNow - lastRaise).TotalSeconds < 1.2) { ToggleWindow(); lastRaise = DateTime.MinValue; }
+                else lastRaise = DateTime.UtcNow;
+            }
+            Fade(facing);
+            if (alpha > 0 && DateTime.UtcNow >= nextFrame)
+            {
+                nextFrame = DateTime.UtcNow.AddMilliseconds(80);   // about 12 a second: plenty for the slow shimmer
+                Upload();
+            }
+        }
+
+        // What SteamVR's laser did over the card and the window since the last frame. Its mouse y counts up from the
+        // bottom.
+        void Pointing()
+        {
+            var e = new OpenVr.Event();
+            uint size = (uint)Marshal.SizeOf(typeof(OpenVr.Event));
+            while (OpenVr.PollOverlayEvent(overlay, ref e, size))
+            {
+                if (e.Type != OpenVr.MouseMove && e.Type != OpenVr.MouseDown) continue;
+                var area = card.CardArea;
+                var p = new Point(area.X + (int)(OpenVr.First(e) / texScale), area.Y + (int)((texHeight - OpenVr.Second(e)) / texScale));
+                int button = card.PlayerButtonAt(p);
+                if (e.Type == OpenVr.MouseMove) card.HoverButton = button;
+                else if (OpenVr.Button(e) == OpenVr.LeftButton && button >= 0 && alpha > 0.5f) card.Press(button);
+            }
+            if (window == 0) return;
+            while (OpenVr.PollOverlayEvent(window, ref e, size))
+                if (windowOpen) WindowPointing(e);
+        }
+
+        void Fade(bool show)
+        {
+            float target = show ? 1 : 0;
+            if (alpha == target) return;
+            alpha = show ? Math.Min(1, alpha + 0.12f) : Math.Max(0, alpha - 0.08f);
+            OpenVr.SetAlpha(overlay, alpha);
+            if (alpha > 0 && !shown) { Upload(); OpenVr.ShowOverlay(overlay); shown = true; }
+            else if (alpha <= 0 && shown) { OpenVr.HideOverlay(overlay); shown = false; card.HoverButton = -1; }
+        }
+
+        float texScale = 1;   // card texture pixels per card pixel
+
+        IntPtr cardTexture, windowTexture;   // the overlays' textures on the graphics card
+        int cardTexW, cardTexH, windowTexW, windowTexH;
+
+        // The card at full size as a texture; without one (no Direct3D 11) small enough for raw pixels, or as a file.
+        void Upload()
+        {
+            int w = texWidth, h = texHeight;
+            var bgra = Picture(card, clock.Elapsed.TotalSeconds, Gpu.Ready ? int.MaxValue : OpenVr.RawLimit, out texWidth, out texHeight, out texScale);
+            var pin = GCHandle.Alloc(bgra, GCHandleType.Pinned);
+            bool sent;
+            try { sent = ToGpu(overlay, ref cardTexture, ref cardTexW, ref cardTexH, pin.AddrOfPinnedObject(), texWidth * 4, texWidth, texHeight); }
+            finally { pin.Free(); }
+            if (!sent)
+            {
+                var rgba = (byte[])bgra.Clone();
+                for (int i = 0; i < rgba.Length; i += 4) { rgba[i] = bgra[i + 2]; rgba[i + 2] = bgra[i]; }
+                if (Send(overlay, rgba, texWidth, texHeight, ref buffer, ref bufferSize) != 0)
+                    using (var bmp = ToBitmap(bgra, texWidth, texHeight)) ShowFile(overlay, bmp, "vr-wrist");
+            }
+            if (w != texWidth || h != texHeight)
+            {
+                var scale = new OpenVr.Vector2 { X = texWidth, Y = texHeight };   // the laser's mouse in pixels
+                OpenVr.SetMouseScale(overlay, ref scale);
+            }
+        }
+
+        // New pixels (BGRA rows, top first) into an overlay's texture, made or remade at that size, and the texture
+        // handed to SteamVR. False if there's no Direct3D 11 or SteamVR turned it down.
+        static bool ToGpu(ulong handle, ref IntPtr texture, ref int texW, ref int texH, IntPtr pixels, int rowPitch, int width, int height)
+        {
+            if (!Gpu.Ready) return false;
+            if (texture == IntPtr.Zero || texW != width || texH != height)
+            {
+                Gpu.Release(ref texture);
+                texture = Gpu.Texture(width, height);
+                texW = width;
+                texH = height;
+            }
+            if (texture == IntPtr.Zero) return false;
+            Gpu.Update(texture, pixels, rowPitch);
+            var t = new OpenVr.Texture { Handle = texture, Type = 0, ColorSpace = 1 };
+            return OpenVr.SetTexture(handle, ref t) == 0;
+        }
+
+        // Raw pixels to an overlay; returns SteamVR's error (0 when it took them).
+        static int Send(ulong handle, byte[] rgba, int width, int height, ref IntPtr buffer, ref int bufferSize)
+        {
+            if (bufferSize < rgba.Length)
+            {
+                if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+                buffer = Marshal.AllocHGlobal(rgba.Length);
+                bufferSize = rgba.Length;
+            }
+            Marshal.Copy(rgba, 0, buffer, rgba.Length);
+            return OpenVr.SetRaw(handle, buffer, (uint)width, (uint)height, 4);
+        }
+
+        // A picture to an overlay as a PNG file in the temp folder. The name takes turns between two, so SteamVR sees a
+        // new file every time and loads it again.
+        bool flip;
+
+        void ShowFile(ulong handle, Bitmap bmp, string name)
+        {
+            string folder = Path.Combine(Path.GetTempPath(), "Dino Visualizer");
+            Directory.CreateDirectory(folder);
+            string file = Path.Combine(folder, name + (flip ? "-a.png" : "-b.png"));
+            flip = !flip;
+            bmp.Save(file, ImageFormat.Png);
+            OpenVr.FromFile(handle, file);
+        }
+
+        static Bitmap ToBitmap(byte[] bgra, int width, int height)
+        {
+            var bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+            var data = bmp.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+            for (int y = 0; y < height; y++) Marshal.Copy(bgra, y * width * 4, data.Scan0 + y * data.Stride, width * 4);
+            bmp.UnlockBits(data);
+            return bmp;
+        }
+
+        // ---- The app's window floating in VR: about 80 cm in front of where you were looking when it opened, level
+        // and facing you, a meter wide. It's redrawn several times a second while it's open. Above it is a bar with a close
+        // button. The laser's moves, trigger and thumbstick scrolling go to the control under it as mouse messages,
+        // so everything in the window works (sliders drag, lists open and scroll).
+
+        const float WindowWidth = 1.0f;
+        const int Bar = 56, MaxWindowWidth = 1600;
+        bool windowOpen;
+        DateTime nextWindowFrame;
+        int windowTexWidth = 1, windowTexHeight = 1;
+        float windowScale = 1;   // texture pixels per window pixel
+        Control mouseOn;         // the control the laser's over (or holding, while the trigger's down)
+        bool mouseHeld;
+
+        public bool WindowOpen { get { return windowOpen; } }
+
+        void ToggleWindow()
+        {
+            if (window == 0 || App == null) return;
+            windowOpen = !windowOpen;
+            if (!windowOpen)
+            {
+                ReleaseWindowMouse();
+                OpenVr.HideOverlay(window);
+                ReleaseWindowPictures();
+                return;
+            }
+            nextFullDraw = DateTime.MinValue;
+            var head = poses[OpenVr.Hmd].DeviceToAbsolute;
+            float fx = -head.M2, fz = -head.M10, len = (float)Math.Sqrt(fx * fx + fz * fz);   // where you're looking, level
+            if (len < 1e-3f) { fx = 0; fz = -1; len = 1; }
+            fx /= len;
+            fz /= len;
+            // Columns: right = up x face, up, and the face pointing back at you.
+            float zx = -fx, zz = -fz;
+            var at = new OpenVr.Matrix34
+            {
+                M0 = zz, M1 = 0, M2 = zx, M3 = head.M3 + fx * 0.8f,
+                M4 = 0, M5 = 1, M6 = 0, M7 = head.M7 - 0.05f,
+                M8 = -zx, M9 = 0, M10 = zz, M11 = head.M11 + fz * 0.8f
+            };
+            OpenVr.SetAbsolute(window, OpenVr.Standing, ref at);
+            UploadWindow();
+            OpenVr.ShowOverlay(window);
+        }
+
+        // ---- Drawing the window costs a lot (the whole thing at once took 160 ms or more), so it's drawn a part at a
+        // time into a picture that's kept: every frame just the part that keeps moving (Live: the page, with the
+        // visualizer and lyrics), and everything (the bars and Options too) every 2 seconds or right after the laser
+        // clicks or scrolls. Frames are spaced at least 3 times as long as the last one took, so the window never
+        // takes more than about a quarter of the app's time.
+
+        public Control Live;            // the part of the window that changes all the time
+        Bitmap windowCanvas;            // the window's client area at its own size
+        Bitmap windowPicture;           // the bar and the window, at the size it goes to SteamVR
+        DateTime nextFullDraw;
+
+        // As a texture; without one (no Direct3D 11) as a picture file, as it's far too big for raw pixels.
+        void UploadWindow()
+        {
+            if (!DrawWindow(DateTime.UtcNow >= nextFullDraw)) return;
+            if (DateTime.UtcNow >= nextFullDraw) nextFullDraw = DateTime.UtcNow.AddSeconds(2);
+            int w = windowPicture.Width, h = windowPicture.Height;
+            var data = windowPicture.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            bool sent;
+            try { sent = ToGpu(window, ref windowTexture, ref windowTexW, ref windowTexH, data.Scan0, data.Stride, w, h); }
+            finally { windowPicture.UnlockBits(data); }
+            if (!sent) ShowFile(window, windowPicture, "vr-window");
+            if (w != windowTexWidth || h != windowTexHeight)
+            {
+                windowTexWidth = w;
+                windowTexHeight = h;
+                var scale = new OpenVr.Vector2 { X = w, Y = h };
+                OpenVr.SetMouseScale(window, ref scale);
+            }
+        }
+
+        // Brings windowPicture up to date: everything when full (or the size changed), else just the Live part. False
+        // while the window's minimized (nothing to show).
+        public bool DrawWindow(bool full)
+        {
+            if (App == null || App.IsDisposed) return false;
+            var size = App.ClientSize;
+            if (size.Width < 200 || size.Height < 150) return false;
+            windowScale = Math.Min(1f, MaxWindowWidth / (float)size.Width);
+            int w = (int)(size.Width * windowScale), h = (int)(size.Height * windowScale) + Bar;
+            if (windowCanvas == null || windowCanvas.Size != size)
+            {
+                if (windowCanvas != null) windowCanvas.Dispose();
+                windowCanvas = new Bitmap(size.Width, size.Height, PixelFormat.Format32bppArgb);
+                full = true;
+            }
+            if (windowPicture == null || windowPicture.Width != w || windowPicture.Height != h)
+            {
+                if (windowPicture != null) windowPicture.Dispose();
+                windowPicture = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+                full = true;
+            }
+            if (full || Live == null)
+            {
+                foreach (Control c in App.Controls)
+                    if (Shown(c)) c.DrawToBitmap(windowCanvas, c.Bounds);
+            }
+            else
+            {
+                var at = App.PointToClient(Live.PointToScreen(Point.Empty));
+                Live.DrawToBitmap(windowCanvas, new Rectangle(at, Live.Size));
+            }
+            using (var g = Graphics.FromImage(windowPicture))
+            {
+                g.InterpolationMode = windowScale < 1 ? InterpolationMode.Bilinear : InterpolationMode.NearestNeighbor;
+                g.PixelOffsetMode = PixelOffsetMode.Half;
+                g.DrawImage(windowCanvas, new Rectangle(0, Bar, w, h - Bar));
+                if (full) DrawBar(g, w);
+            }
+            return true;
+        }
+
+        // The bar above the window: the name, how to close it, and a close button.
+        static void DrawBar(Graphics g, int w)
+        {
+            using (var b = new SolidBrush(Theme.Ink)) g.FillRectangle(b, 0, 0, w, Bar);
+            using (var b = new SolidBrush(Theme.Primary)) g.FillRectangle(b, 0, Bar - 3, w, 3);
+            TextRenderer.DrawText(g, "Dino Visualizer   ·   point and pull the trigger to click   ·   turn your wrist twice to close", Theme.Header,
+                new Rectangle(18, 0, w - Bar * 2, Bar - 3), Theme.Primary, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+            var close = new Rectangle(w - Bar * 3 / 2, 6, Bar, Bar - 15);
+            using (var b = new SolidBrush(Theme.Primary)) g.FillRectangle(b, close);
+            TextRenderer.DrawText(g, "✕", Theme.Header, close, Theme.Ink, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        }
+
+        void ReleaseWindowPictures()
+        {
+            if (windowCanvas != null) windowCanvas.Dispose();
+            if (windowPicture != null) windowPicture.Dispose();
+            windowCanvas = windowPicture = null;
+        }
+
+        // A control's own visible flag (the window itself may be hidden in the tray, and then every control reports
+        // itself not visible).
+        static bool Shown(Control c) { return GetState == null ? c.Visible : (bool)GetState.Invoke(c, new object[] { 2 }); }
+
+        [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
+        const int WmMouseMove = 0x200, WmLButtonDown = 0x201, WmLButtonUp = 0x202, WmMouseWheel = 0x20A, WmMouseLeave = 0x2A3, MkLButton = 1;
+        static readonly System.Reflection.MethodInfo GetState = typeof(Control).GetMethod("GetState", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+        void WindowPointing(OpenVr.Event e)
+        {
+            float x = OpenVr.First(e), y = windowTexHeight - OpenVr.Second(e);
+            // A click or a scroll may change anything in the window: all of it is drawn again, in a moment.
+            if (e.Type != OpenVr.MouseMove)
+            {
+                nextFullDraw = DateTime.MinValue;
+                var soon = DateTime.UtcNow.AddMilliseconds(60);
+                if (nextWindowFrame > soon) nextWindowFrame = soon;
+            }
+            if (e.Type == OpenVr.ScrollSmooth)
+            {
+                if (mouseOn != null) Message(mouseOn, WmMouseWheel, (int)(OpenVr.Second(e) * 120) << 16, lastPoint, true);
+                return;
+            }
+            if (e.Type != OpenVr.MouseMove && e.Type != OpenVr.MouseDown && e.Type != OpenVr.MouseUp) return;
+            if (y < Bar)
+            {
+                // The bar: the close button closes it.
+                if (e.Type == OpenVr.MouseDown && x > windowTexWidth - Bar * 2) ToggleWindow();
+                return;
+            }
+            var p = new Point((int)(x / windowScale), (int)((y - Bar) / windowScale));   // in the window's client area
+            lastPoint = p;
+            if (e.Type == OpenVr.MouseDown && OpenVr.Button(e) == OpenVr.LeftButton)
+            {
+                mouseOn = ControlAt(p);
+                mouseHeld = true;
+                Message(mouseOn, WmLButtonDown, MkLButton, p, false);
+            }
+            else if (e.Type == OpenVr.MouseUp && mouseHeld)
+            {
+                mouseHeld = false;
+                if (mouseOn != null) Message(mouseOn, WmLButtonUp, 0, p, false);
+            }
+            else if (e.Type == OpenVr.MouseMove)
+            {
+                // While held, the control it went down on keeps getting the moves (dragging a slider).
+                var on = mouseHeld ? mouseOn : ControlAt(p);
+                if (on != mouseOn && mouseOn != null && !mouseOn.IsDisposed) SendMessage(mouseOn.Handle, WmMouseLeave, IntPtr.Zero, IntPtr.Zero);
+                mouseOn = on;
+                Message(on, WmMouseMove, mouseHeld ? MkLButton : 0, p, false);
+            }
+        }
+
+        Point lastPoint;
+
+        void ReleaseWindowMouse()
+        {
+            if (mouseOn != null && !mouseOn.IsDisposed && mouseOn.IsHandleCreated)
+            {
+                if (mouseHeld) Message(mouseOn, WmLButtonUp, 0, lastPoint, false);
+                SendMessage(mouseOn.Handle, WmMouseLeave, IntPtr.Zero, IntPtr.Zero);
+            }
+            mouseOn = null;
+            mouseHeld = false;
+        }
+
+        // The innermost control at a point in the window's client area. A control's own visible flag is asked for, as
+        // the window itself may be hidden in the tray (then every control reports itself not visible).
+        Control ControlAt(Point p)
+        {
+            Control c = App;
+            while (true)
+            {
+                Control next = null;
+                foreach (Control child in c.Controls)
+                    if (Shown(child) && child.Bounds.Contains(p)) { next = child; break; }
+                if (next == null) return c;
+                p = new Point(p.X - next.Left, p.Y - next.Top);
+                c = next;
+            }
+        }
+
+        // A mouse message to a control, at a point in the window's client area (in screen coordinates for the wheel).
+        void Message(Control c, int msg, int wParam, Point p, bool screen)
+        {
+            if (c == null || c.IsDisposed || !c.IsHandleCreated) return;
+            var at = screen ? App.PointToScreen(p) : c.PointToClient(App.PointToScreen(p));
+            SendMessage(c.Handle, msg, (IntPtr)wParam, (IntPtr)((at.Y << 16) | (at.X & 0xFFFF)));
+        }
+
+        // The card as a hologram, as BGRA bytes (row by row from the top), no bigger than limit bytes (scale is texture
+        // pixels per card pixel).
+        public static byte[] Picture(NowPlayingWidget card, double time, int limit, out int width, out int height, out float scale)
+        {
+            var area = card.CardArea;
+            scale = (float)Math.Min(1, Math.Sqrt(limit / 4.0 / (area.Width * area.Height)));
+            width = Math.Max(1, (int)(area.Width * scale));
+            height = Math.Max(1, (int)(area.Height * scale));
+            var bgra = new byte[width * height * 4];
+            bool layered = card.Style == NowPlayingWidget.AeroStyle || card.Style == NowPlayingWidget.XpStyle || card.Style == NowPlayingWidget.OrbStyle;
+            using (var whole = card.Snapshot())
+            using (var snap = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+            {
+                using (var g = Graphics.FromImage(snap))
+                {
+                    g.CompositingMode = CompositingMode.SourceCopy;   // keeps the see-through edges
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    g.DrawImage(whole, new Rectangle(0, 0, width, height), area, GraphicsUnit.Pixel);
+                }
+                var data = snap.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+                var src = new byte[data.Stride * height];
+                Marshal.Copy(data.Scan0, src, 0, src.Length);
+                snap.UnlockBits(data);
+                Color tint = Theme.Primary;
+                float flicker = 0.97f + 0.03f * (float)(Math.Sin(time * 23) * Math.Sin(time * 7.3));   // the faintest shimmer
+                float beam = (float)((time * 0.3) % 1.5 - 0.25) * height;   // a band of light sweeping down every 5 seconds
+                float glitchRow = (float)((time * 1.7) % 1) * height;      // once in a while a few rows slip sideways
+                bool glitch = Math.Sin(time * 0.9) > 0.998;
+                for (int y = 0; y < height; y++)
+                {
+                    float scan = y % 3 == 0 ? 0.55f : 1f;
+                    float band = Math.Max(0, 1 - Math.Abs(y - beam) / (height * 0.07f)) * 0.5f;
+                    int shift = glitch && Math.Abs(y - glitchRow) < height * 0.04f ? (int)(width * 0.02f) : 0;
+                    for (int x = 0; x < width; x++)
+                    {
+                        int sx = Math.Min(width - 1, Math.Max(0, x - shift));
+                        int i = y * data.Stride + sx * 4, o = (y * width + x) * 4;
+                        float a = layered ? src[i + 3] / 255f : 1f;
+                        float l = (0.114f * src[i] + 0.587f * src[i + 1] + 0.299f * src[i + 2]) / 255f;
+                        float glow = Math.Min(1, l * 1.25f + band);
+                        float white = l * l * 0.5f + band * 0.4f;
+                        bgra[o] = (byte)Math.Min(255, tint.B * (0.4f + 0.6f * glow) + 255 * white);
+                        bgra[o + 1] = (byte)Math.Min(255, tint.G * (0.4f + 0.6f * glow) + 255 * white);
+                        bgra[o + 2] = (byte)Math.Min(255, tint.R * (0.4f + 0.6f * glow) + 255 * white);
+                        // Never quite solid, so even the light looks (Aero's sky, XP's silver) stay see-through.
+                        bgra[o + 3] = (byte)Math.Min(255, 255 * a * (0.12f + 0.68f * Math.Min(1, l * 1.5f) + band * 0.3f) * scan * flicker);
+                    }
+                }
+            }
+            // A glowing frame round the rectangular looks, like the edge of the projection.
+            if (!layered)
+                for (int x = 0; x < width; x++)
+                    for (int y = 0; y < height; y++)
+                        if (x < 2 || y < 2 || x >= width - 2 || y >= height - 2)
+                        {
+                            int o = (y * width + x) * 4;
+                            bgra[o + 3] = Math.Max(bgra[o + 3], (byte)200);
+                        }
+            return bgra;
         }
     }
 
@@ -10043,6 +10974,7 @@ namespace DinoVisualizer
         float widgetOpacity = (float)Math.Max(NowPlayingWidget.MinOpacity, Math.Min(1, Settings.Num("widgetopacity", 1)));
         int vizStyle, scanIdx, uiTicks;
         bool closeToTray, exiting, trayHintShown, minimized, startInTray;
+        readonly VrWrist wrist = new VrWrist();
 
         public MainForm()
         {
@@ -10084,6 +11016,19 @@ namespace DinoVisualizer
             VrcChatbox.Adlibs = Clamp(Settings.Num("vrcadlibs", 0), VrcChatbox.AdlibNames.Length);
             VrcChatbox.Restore(Settings.Num("vrcstatus", 0) != 0, (int)Settings.Num("vrcstatuscycle", 0), (int)Settings.Num("vrcstatusidx", 0));
             Updater.Mode = Clamp(Settings.Num("updates", 0), Updater.Names.Length);
+            // The VR wrist (it only connects while SteamVR is running).
+            wrist.Width = (float)Math.Max(0.06, Math.Min(0.4, Settings.Num("vrwristsize", 0.17)));
+            wrist.OffsetX = (float)Settings.Num("vrwristx", 0);
+            wrist.OffsetY = (float)Settings.Num("vrwristy", 0);
+            wrist.OffsetZ = (float)Settings.Num("vrwristz", 0);
+            wrist.LevelSource = () => watcher != null ? watcher.Level : 0;
+            wrist.App = this;
+            wrist.Live = page;
+            wrist.Visualizer = vizStyle;
+            wrist.Command += slot => { if (watcher != null) watcher.Send(slot); };
+            wrist.Changed += () => { if (IsHandleCreated && !IsDisposed) BeginInvoke((Action)UpdateStatus); };
+            wrist.Look = Clamp(Settings.Num("vrwristlook", 0), VrWrist.Looks.Length);
+            wrist.Place = Clamp(Settings.Num("vrwrist", 0), VrWrist.Names.Length);
             AutoStart.Follow();
             startInTray = AutoStart.InTray;
             if (startInTray) Opacity = 0;
@@ -10140,11 +11085,12 @@ namespace DinoVisualizer
             frames.Tick += (s, e) =>
             {
                 StepColors();   // also while the window is hidden: the widget shows the colors too
-                if (Visible && WindowState != FormWindowState.Minimized) page.Animate(watcher != null ? watcher.Level : 0);
+                // (Also while the window floats in VR, even with it put away here.)
+                if ((Visible && WindowState != FormWindowState.Minimized) || wrist.WindowOpen) page.Animate(watcher != null ? watcher.Level : 0);
             };
             ui.Tick += (s, e) =>
             {
-                if (Visible && WindowState != FormWindowState.Minimized) page.Pulse();
+                if ((Visible && WindowState != FormWindowState.Minimized) || wrist.WindowOpen) page.Pulse();
                 VrcChatbox.Tick(current);
                 // Memory that's no longer needed goes back to Windows: once starting up has settled, then every ten
                 // minutes.
@@ -10353,6 +11299,17 @@ namespace DinoVisualizer
                 Label = "Chatbox Adlibs:", Choices = VrcChatbox.AdlibNames, Current = () => VrcChatbox.Adlibs,
                 Choose = i => { VrcChatbox.Adlibs = i; Settings.Set("vrcadlibs", i); VrcChatbox.Tick(current); }
             });
+            // The hologram card on a wrist in SteamVR, and which of the widget's looks it has.
+            options.Rows.Add(new OptionsPanel.Row
+            {
+                Label = "VR Wrist:", Choices = VrWrist.Names, Current = () => wrist.Place,
+                Choose = i => { wrist.Place = i; Settings.Set("vrwrist", i); UpdateStatus(); }
+            });
+            options.Rows.Add(new OptionsPanel.Row
+            {
+                Label = "VR Wrist Look:", Choices = VrWrist.Looks, Current = () => wrist.Look,
+                Choose = i => { wrist.Look = i; Settings.Set("vrwristlook", i); }
+            });
             options.Rows.Add(new OptionsPanel.Row
             {
                 Label = "Scanlines:", Choices = ScanlineNames, Current = () => scanIdx,
@@ -10446,6 +11403,7 @@ namespace DinoVisualizer
             Settings.Set("viz", v);
             page.Style = v;
             if (widget != null) widget.Visualizer = v;
+            wrist.Visualizer = v;
             page.Invalidate();
             options.Invalidate();
         }
@@ -10458,6 +11416,7 @@ namespace DinoVisualizer
             current = info;
             page.SetInfo(info);
             if (widget != null) widget.SetInfo(info);
+            wrist.SetInfo(info);
             if (old.Art != null && old.Art != info.Art) old.Art.Dispose();
             UpdateStatus();
         }
@@ -10491,7 +11450,8 @@ namespace DinoVisualizer
             UpdateStrawberry();
             bool any = !string.IsNullOrEmpty(current.Title);
             top.State = !any ? "Idle" : current.Playing ? "Playing" : "Paused";
-            top.Line2 = "Widget: " + (widget == null ? "Off" : StyleNames[widget.Style + 1]) + "   (Ctrl+F11 shows or hides it)" + SleepNote();
+            top.Line2 = "Widget: " + (widget == null ? "Off" : StyleNames[widget.Style + 1]) + "   (Ctrl+F11 shows or hides it)" + SleepNote()
+                      + (wrist.Place == 0 ? "" : wrist.Connected ? "   ·   VR Wrist: On" : "   ·   VR Wrist: Waiting For SteamVR");
             top.Invalidate();
             widgetButton.Text = widget == null ? "Show Widget" : "Hide Widget";
             bottom.Invalidate();
@@ -10704,6 +11664,7 @@ namespace DinoVisualizer
             if (strawberry != null) strawberry.Close();
             strawberry = null;
             VrcChatbox.Stop();
+            wrist.Dispose();
             tray.Visible = false;
             tray.Dispose();
             base.OnFormClosed(e);
