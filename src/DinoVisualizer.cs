@@ -19,7 +19,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.2.2.0")]
+[assembly: System.Reflection.AssemblyVersion("1.3.0.0")]
 [assembly: System.Reflection.AssemblyTitle("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyProduct("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyCompany("Saosin LLC")]
@@ -4338,6 +4338,11 @@ namespace DinoVisualizer
         [UnmanagedFunctionPointer(CallingConvention.StdCall)] [return: MarshalAs(UnmanagedType.I1)] public delegate bool PollEventFn(ref Event e, uint size);
         [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate void HapticFn(uint device, uint axis, ushort microseconds);
         [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate void AckQuitFn();
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int DeviceIntFn(uint device);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] [return: MarshalAs(UnmanagedType.I1)] public delegate bool DeviceBoolFn(uint device);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] [return: MarshalAs(UnmanagedType.I1)] public delegate bool BoolPropFn(uint device, int prop, ref int error);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate float FloatPropFn(uint device, int prop, ref int error);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall, CharSet = CharSet.Ansi)] public delegate uint StringPropFn(uint device, int prop, System.Text.StringBuilder value, uint size, ref int error);
         [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int CreateOverlayFn(IntPtr key, IntPtr name, ref ulong handle);
         [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int OverlayFn(ulong handle);
         [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int OverlayFloatFn(ulong handle, float value);
@@ -4362,6 +4367,11 @@ namespace DinoVisualizer
         public static PollEventFn PollEvent;
         public static HapticFn Haptic;
         public static AckQuitFn AckQuit;
+        static DeviceIntFn DeviceClass, ControllerRole;
+        static DeviceBoolFn IsConnected;
+        static BoolPropFn BoolProp;
+        static FloatPropFn FloatProp;
+        static StringPropFn StringProp;
         public static CreateOverlayFn CreateOverlay;
         public static OverlayFn DestroyOverlay, ShowOverlay, HideOverlay;
         public static OverlayFloatFn SetAlpha, SetWidth;
@@ -4445,6 +4455,12 @@ namespace DinoVisualizer
                 PollEvent = Fn<PollEventFn>(system, 30);
                 Haptic = Fn<HapticFn>(system, 39);
                 AckQuit = Fn<AckQuitFn>(system, 47);
+                ControllerRole = Fn<DeviceIntFn>(system, 19);
+                DeviceClass = Fn<DeviceIntFn>(system, 20);
+                IsConnected = Fn<DeviceBoolFn>(system, 21);
+                BoolProp = Fn<BoolPropFn>(system, 22);
+                FloatProp = Fn<FloatPropFn>(system, 23);
+                StringProp = Fn<StringPropFn>(system, 28);
                 CreateOverlay = Fn<CreateOverlayFn>(overlay, 1);
                 DestroyOverlay = Fn<OverlayFn>(overlay, 3);
                 SetAlpha = Fn<OverlayFloatFn>(overlay, 16);
@@ -4472,6 +4488,63 @@ namespace DinoVisualizer
             if (!Running) return;
             Running = false;
             try { ShutdownInternal(); } catch { }
+        }
+
+        // ---- Batteries: the headset's, the controllers' and the trackers' (not the base stations'), each with a short
+        // name, its level (0..1) and whether it's charging. Devices that don't report a battery (an Index headset, a
+        // wired one) are left out.
+        public struct Battery { public string Name; public float Level; public bool Charging; }
+
+        const int HeadsetClass = 1, ControllerClass = 2, TrackerClass = 3;
+        const int ProvidesBattery = 1026, BatteryLevel = 1012, IsCharging = 1011, ControllerType = 7000;
+
+        public static List<Battery> Batteries()
+        {
+            var found = new List<KeyValuePair<int, Battery>>();   // with an order: headset, left, right, others, trackers
+            if (!Running) return new List<Battery>();
+            int trackers = 0;
+            for (uint i = 0; i < MaxDevices; i++)
+            {
+                int kind = DeviceClass(i);
+                if (kind < HeadsetClass || kind > TrackerClass || !IsConnected(i)) continue;
+                int error = 0;
+                if (!BoolProp(i, ProvidesBattery, ref error) || error != 0) continue;
+                float level = FloatProp(i, BatteryLevel, ref error);
+                if (error != 0) continue;
+                bool charging = BoolProp(i, IsCharging, ref error) && error == 0;
+                string name; int order;
+                if (kind == HeadsetClass) { name = "Headset"; order = 0; }
+                else if (kind == ControllerClass)
+                {
+                    int role = ControllerRole(i);
+                    name = role == LeftHand ? "Left" : role == RightHand ? "Right" : "Controller";
+                    order = role == LeftHand ? 1 : role == RightHand ? 2 : 3;
+                }
+                else { name = TrackerName(Text(i, ControllerType), ++trackers); order = 4; }
+                found.Add(new KeyValuePair<int, Battery>(order, new Battery { Name = name, Level = Math.Max(0, Math.Min(1, level)), Charging = charging }));
+            }
+            return found.OrderBy(f => f.Key).Select(f => f.Value).ToList();   // OrderBy keeps devices of a kind in order
+        }
+
+        static string Text(uint device, int prop)
+        {
+            var s = new System.Text.StringBuilder(256);
+            int error = 0;
+            StringProp(device, prop, s, (uint)s.Capacity, ref error);
+            return error == 0 ? s.ToString() : "";
+        }
+
+        // A tracker by the body part SteamVR's Manage Trackers gave it ("vive_tracker_left_foot": "L Foot"), else
+        // "Tracker 2".
+        public static string TrackerName(string type, int number)
+        {
+            int at = (type ?? "").LastIndexOf("tracker_", StringComparison.OrdinalIgnoreCase);
+            string part = at >= 0 ? type.Substring(at + 8).ToLowerInvariant() : "";
+            if (part == "" || part == "handed" || part == "none") return "Tracker " + number;
+            part = Regex.Replace(part, @"^left_", "L ");
+            part = Regex.Replace(part, @"^right_", "R ");
+            part = part.Replace('_', ' ');
+            return Regex.Replace(part, @"\b[a-z]", m => m.Value.ToUpperInvariant());
         }
     }
 
@@ -4621,6 +4694,17 @@ namespace DinoVisualizer
         }
 
         public int Visualizer { set { visualizer = value; if (card != null) card.Visualizer = value; } }
+
+        // The batteries' row under the strip, read again every 5 seconds while the card shows.
+        bool showBatteries;
+        List<OpenVr.Battery> batteries = new List<OpenVr.Battery>();
+        DateTime nextBatteries;
+
+        public bool ShowBatteries
+        {
+            get { return showBatteries; }
+            set { showBatteries = value; nextBatteries = DateTime.MinValue; }
+        }
 
         public void SetInfo(NowPlayingInfo next)
         {
@@ -4836,9 +4920,9 @@ namespace DinoVisualizer
                 if (y >= cardTexHeight)
                 {
                     // The strip under the card, with the handle at its end.
-                    var buttons = StripButtons(texWidth, cardTexHeight, texHeight - cardTexHeight);
+                    var buttons = StripButtons(texWidth, cardTexHeight, StripHeight(texWidth));
                     int at = Array.FindIndex(buttons, r => r.Contains((int)x, (int)y));
-                    if (HandleRect(texWidth, cardTexHeight, texHeight - cardTexHeight).Contains((int)x, (int)y)) at = HandleIndex;
+                    if (HandleRect(texWidth, cardTexHeight, StripHeight(texWidth)).Contains((int)x, (int)y)) at = HandleIndex;
                     card.HoverButton = -1;
                     stripHover = at;
                     if (click && at == HandleIndex) GrabHandle();
@@ -5009,8 +5093,13 @@ namespace DinoVisualizer
         void Upload()
         {
             int w = texWidth, h = texHeight;
+            if (showBatteries && DateTime.UtcNow >= nextBatteries)
+            {
+                try { batteries = OpenVr.Batteries(); } catch { batteries = new List<OpenVr.Battery>(); }
+                nextBatteries = DateTime.UtcNow.AddSeconds(5);
+            }
             var bgra = Picture(card, clock.Elapsed.TotalSeconds, Gpu.Ready ? int.MaxValue : OpenVr.RawLimit, moving ? HandleIndex : stripHover, windowOpen,
-                               out texWidth, out texHeight, out cardTexHeight, out texScale);
+                               showBatteries ? batteries : null, out texWidth, out texHeight, out cardTexHeight, out texScale);
             var pin = GCHandle.Alloc(bgra, GCHandleType.Pinned);
             bool sent;
             try { sent = ToGpu(overlay, ref cardTexture, ref cardTexW, ref cardTexH, pin.AddrOfPinnedObject(), texWidth * 4, texWidth, texHeight); }
@@ -5421,17 +5510,21 @@ namespace DinoVisualizer
             if (button != OpenApp && Adjusted != null) Adjusted();
         }
 
-        // The card as a hologram with the strip under it, as BGRA bytes (row by row from the top), the card part no
-        // bigger than limit bytes (scale is texture pixels per card pixel). cardHeight is where the strip starts.
-        public static byte[] Picture(NowPlayingWidget card, double time, int limit, int hover, bool appOpen, out int width, out int height, out int cardHeight, out float scale)
+        // The card as a hologram with the strip under it (and the batteries under that, unless they're null), as BGRA
+        // bytes (row by row from the top), the card part no bigger than limit bytes (scale is texture pixels per card
+        // pixel). cardHeight is where the strip starts.
+        public static byte[] Picture(NowPlayingWidget card, double time, int limit, int hover, bool appOpen, IList<OpenVr.Battery> batteries,
+                                     out int width, out int height, out int cardHeight, out float scale)
         {
             var area = card.CardArea;
             scale = (float)Math.Min(1, Math.Sqrt(limit / 4.0 / (area.Width * area.Height)));
             width = Math.Max(1, (int)(area.Width * scale));
             int ch = cardHeight = Math.Max(1, (int)(area.Height * scale));
-            height = ch + StripHeight(width);
+            int sh = StripHeight(width);
+            height = ch + sh + (batteries != null ? BatteriesHeight(width, batteries.Count) : 0);
             var bgra = new byte[width * height * 4];
-            DrawStrip(bgra, width, ch, height - ch, hover, appOpen);
+            DrawStrip(bgra, width, ch, sh, hover, appOpen);
+            if (batteries != null) DrawBatteries(bgra, width, ch + sh, height - ch - sh, batteries);
             bool layered = card.Style == NowPlayingWidget.AeroStyle || card.Style == NowPlayingWidget.XpStyle || card.Style == NowPlayingWidget.OrbStyle;
             using (var whole = card.Snapshot())
             using (var snap = new Bitmap(width, ch, PixelFormat.Format32bppArgb))
@@ -5528,6 +5621,86 @@ namespace DinoVisualizer
                 var data = strip.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
                 for (int y = 0; y < height; y++) Marshal.Copy(data.Scan0 + y * data.Stride, bgra, (top + y) * width * 4, width * 4);
                 strip.UnlockBits(data);
+            }
+        }
+
+        // ---- The batteries' row: one box each (three to a row), with a battery that empties as it runs down, green,
+        // then amber under half, red under a fifth, and a bolt while it charges.
+        const int BatteriesPerRow = 3;
+
+        static int BatteryRowHeight(int width) { return Math.Max(34, StripHeight(width) * 4 / 5); }
+
+        static int BatteriesHeight(int width, int count)
+        {
+            int rows = Math.Max(1, (count + BatteriesPerRow - 1) / BatteriesPerRow);
+            return rows * BatteryRowHeight(width) + StripGap(width);
+        }
+
+        public static Color BatteryColor(float level)
+        {
+            return level < 0.2f ? Color.FromArgb(255, 85, 75) : level < 0.5f ? Color.FromArgb(255, 190, 60) : Color.FromArgb(95, 225, 120);
+        }
+
+        static void DrawBatteries(byte[] bgra, int width, int top, int height, IList<OpenVr.Battery> batteries)
+        {
+            int gap = StripGap(width), rowH = BatteryRowHeight(width);
+            int perRow = Math.Max(1, Math.Min(BatteriesPerRow, batteries.Count));
+            int boxW = (width - gap * (perRow + 1)) / perRow, boxH = rowH - gap;
+            using (var row = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+            {
+                using (var g = Graphics.FromImage(row))
+                using (var font = new Font(Theme.Body.FontFamily, Math.Max(10, Math.Min(boxH * 0.4f, boxW * 0.085f)), FontStyle.Bold, GraphicsUnit.Pixel))
+                using (var left = new StringFormat(StringFormatFlags.NoWrap) { LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter })
+                using (var right = new StringFormat(StringFormatFlags.NoWrap) { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Center })
+                using (var center = new StringFormat(StringFormatFlags.NoWrap) { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                {
+                    g.Clear(Color.Transparent);
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                    float line = Math.Max(2, boxH / 16f);
+                    if (batteries.Count == 0)
+                    {
+                        var box = new Rectangle(gap, gap, width - 2 * gap, boxH);
+                        using (var b = new SolidBrush(Color.FromArgb(90, 10, 12, 18))) g.FillRectangle(b, box);
+                        using (var p = new Pen(Color.FromArgb(160, Theme.Primary), line)) g.DrawRectangle(p, box);
+                        using (var b = new SolidBrush(Theme.Bright)) g.DrawString("No batteries reported by SteamVR", font, b, box, center);
+                    }
+                    for (int i = 0; i < batteries.Count; i++)
+                    {
+                        var bat = batteries[i];
+                        var box = new Rectangle(gap + (i % perRow) * (boxW + gap), gap + (i / perRow) * rowH, boxW, boxH);
+                        using (var b = new SolidBrush(Color.FromArgb(90, 10, 12, 18))) g.FillRectangle(b, box);
+                        using (var p = new Pen(Color.FromArgb(220, Theme.Primary), line)) g.DrawRectangle(p, box);
+                        // The battery: an outline with a nub on the right, filled as far as it's charged.
+                        Color color = BatteryColor(bat.Level);
+                        float bh = boxH * 0.42f, bw = bh * 1.9f, bx = box.X + boxH * 0.3f, by = box.Y + (boxH - bh) / 2;
+                        using (var p = new Pen(Color.FromArgb(235, color), line)) g.DrawRectangle(p, bx, by, bw, bh);
+                        using (var b = new SolidBrush(color)) g.FillRectangle(b, bx + bw, by + bh * 0.3f, bh * 0.16f, bh * 0.4f);
+                        float inset = line * 1.5f;
+                        using (var b = new SolidBrush(Color.FromArgb(210, color)))
+                            g.FillRectangle(b, bx + inset, by + inset, Math.Max(line, (bw - 2 * inset) * bat.Level), bh - 2 * inset);
+                        if (bat.Charging)
+                        {
+                            float cx = bx + bw / 2, cy = by + bh / 2, s = bh * 0.55f;
+                            var bolt = new[]
+                            {
+                                new PointF(cx + s * 0.15f, cy - s), new PointF(cx - s * 0.45f, cy + s * 0.12f), new PointF(cx, cy + s * 0.12f),
+                                new PointF(cx - s * 0.15f, cy + s), new PointF(cx + s * 0.45f, cy - s * 0.12f), new PointF(cx, cy - s * 0.12f)
+                            };
+                            using (var b = new SolidBrush(Color.White)) g.FillPolygon(b, bolt);
+                            using (var p = new Pen(Color.FromArgb(200, 10, 12, 18), line * 0.6f)) g.DrawPolygon(p, bolt);
+                        }
+                        // The name, and the percentage at the right (the name gives way if it's too long).
+                        float tx = bx + bw + bh * 0.4f, end = box.Right - gap;
+                        string percent = (int)Math.Round(bat.Level * 100) + "%";
+                        float pw = g.MeasureString(percent, font).Width;
+                        using (var b = new SolidBrush(Color.White)) g.DrawString(percent, font, b, new RectangleF(end - pw, box.Y, pw, boxH), right);
+                        using (var b = new SolidBrush(Theme.Bright)) g.DrawString(bat.Name, font, b, new RectangleF(tx, box.Y, Math.Max(0, end - pw - tx - gap), boxH), left);
+                    }
+                }
+                var data = row.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+                for (int y = 0; y < height; y++) Marshal.Copy(data.Scan0 + y * data.Stride, bgra, (top + y) * width * 4, width * 4);
+                row.UnlockBits(data);
             }
         }
     }
@@ -11412,6 +11585,7 @@ namespace DinoVisualizer
             wrist.Command += slot => { if (watcher != null) watcher.Send(slot); };
             wrist.Changed += () => { if (IsHandleCreated && !IsDisposed) BeginInvoke((Action)UpdateStatus); };
             wrist.Look = Clamp(Settings.Num("vrwristlook", 0), VrWrist.Looks.Length);
+            wrist.ShowBatteries = Settings.Num("vrbatteries", 0) != 0;
             wrist.Place = Clamp(Settings.Num("vrwrist", 0), VrWrist.Names.Length);
             AutoStart.Follow();
             startInTray = AutoStart.InTray;
@@ -11710,6 +11884,11 @@ namespace DinoVisualizer
             {
                 Label = "VR Wrist Size:", Choices = VrWrist.Sizes, Current = () => wrist.SizeIndex,
                 Choose = i => { wrist.SizeIndex = i; Settings.Set("vrwristsize", wrist.Width); }
+            });
+            options.Rows.Add(new OptionsPanel.Row
+            {
+                Label = "VR Batteries:", Choices = new[] { "Off", "On" }, Current = () => wrist.ShowBatteries ? 1 : 0,
+                Choose = i => { wrist.ShowBatteries = i == 1; Settings.Set("vrbatteries", i); }
             });
             options.Rows.Add(new OptionsPanel.Row
             {

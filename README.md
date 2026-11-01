@@ -255,6 +255,7 @@ Technical details:
   - If you move the app's folder, open the app once from the new place and the entry follows it.
 - **VRChat Chatbox**: *Off*, *Song*, *Song + Time*, *Song + Progress Bar*, or any of those with the lyrics. It shows what's playing above your head in VRChat (see [VRChat chatbox](#vrchat-chatbox)).
 - **VR Wrist**, **VR Wrist Look** and **VR Wrist Size**: the hologram card on your wrist in SteamVR (see [VR wrist](#vr-wrist-steamvr)).
+- **VR Batteries**: shows the battery of your headset, controllers and trackers under the wrist card.
 - **Chatbox Adlibs**: how background vocals and adlibs look in the chatbox's lyrics: *Tiny*, *Small Caps*, *Normal* or *Hidden*.
 - **Chatbox Bar**: how the chatbox's progress bar looks. There are 15 styles, from *Line* to *Hash*; each choice in the list shows a sample.
 - **Chatbox Clock**: your computer's time at the top of the chatbox: *Off*, *12-Hour* or *24-Hour*.
@@ -302,6 +303,10 @@ How to use it:
   | **Rotate L** / **Rotate R** | Turns the card on your wrist, 15° a click (remembered) |
 - **Move it by hand**: point at the handle in the card's corner (the four-way arrow at the end of the buttons) and hold the trigger. The card follows your hand; let go and it stays there, still on your wrist (it moves with your arm from then on, and is remembered). Double-click the handle to put it back in its usual spot. Picking a different wrist in Options does too.
 - **Resize it by hand**: point at the card (not at a button), hold the trigger, and move that hand: right or up makes it bigger, left or down smaller. Let go to keep the size.
+- **Batteries**: with **VR Batteries** on in Options, a row under the buttons shows the battery of your headset, controllers and trackers, e.g. `Headset 82%`, `Left 64%`, `Waist 15%`.
+  - Each battery is green, then amber under 50% and red under 20%, with a bolt while it's charging. They're read again every 5 seconds.
+  - Trackers are named after the role you gave them in SteamVR's **Manage Trackers** (*Waist*, *L Foot*, …), or *Tracker 1*, *Tracker 2* without one.
+  - Devices that don't report a battery (base stations, a wired headset like the Index) aren't listed.
 - **Open the app's window in VR**: turn your wrist toward your face twice within about a second (show it, turn away, show it again).
   - Dino Visualizer's window appears about 80 cm in front of where you're looking, a meter wide, even while it's put away in the tray on the desktop.
   - It's live: the visualizer, lyrics and everything else move, redrawn about 6 times a second.
