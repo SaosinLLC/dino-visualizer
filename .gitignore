@@ -4,3 +4,4 @@ DinoVisualizerTest.exe
 *.exe.old
 *.exe.download
 _updtest/
+_release/

@@ -1,3 +1,4 @@
+param([string]$Out = "$PSScriptRoot\DinoVisualizer.exe")
 # Builds DinoVisualizer.exe with the C# compiler included in .NET Framework 4.x (no installs needed).
 $fw = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
 if (-not (Test-Path "$fw\csc.exe")) { $fw = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319' }
@@ -13,6 +14,6 @@ $resources = foreach ($file in $maps.Keys) {
     if (Test-Path $path) { "/resource:$path,$($maps[$file])" } else { Write-Host "Missing earth\$file (the Earth visualizer will generate its maps)" }
 }
 
-& "$fw\csc.exe" /nologo /target:winexe /optimize+ /out:"$PSScriptRoot\DinoVisualizer.exe" `
+& "$fw\csc.exe" /nologo /target:winexe /optimize+ /out:"$Out" `
     /win32icon:"$PSScriptRoot\icon.ico" ($refs | ForEach-Object { "/r:$_" }) $resources "$PSScriptRoot\src\DinoVisualizer.cs"
-if ($LASTEXITCODE -eq 0) { Write-Host "Built $PSScriptRoot\DinoVisualizer.exe" }
+if ($LASTEXITCODE -eq 0) { Write-Host "Built $Out" }

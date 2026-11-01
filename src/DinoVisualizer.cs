@@ -19,7 +19,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.0.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.0.1.0")]
 [assembly: System.Reflection.AssemblyTitle("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyProduct("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyCompany("Saosin LLC")]
@@ -6698,15 +6698,16 @@ namespace DinoVisualizer
     {
         public static readonly string[] Names = { "Off", "Song", "Song + Time", "Song + Progress Bar", "Song + Lyrics", "Song + Time + Lyrics", "Song + Bar + Lyrics" };
         // The progress bar's looks: the played part, the knob where the song is (none: \0), the part still to play, and
-        // the ends around it (none: \0). New looks go on the end, so a saved choice keeps its place.
+        // the ends around it (none: \0). New looks go on the end, so a saved choice keeps its place. (Knob, between Moon
+        // and Hash, was taken out in 1.0.1; the choice is saved as "vrcbar2" since then, see MainForm.)
         public static readonly string[] BarNames =
         {
             "Line ━━━●───", "Blocks ███░░░", "Squares ■■■□□□", "Dots ●●●○○○", "Hearts ♥♥♥♡♡♡", "Stars ★★★☆☆☆", "Classic [==>--]",
             "Arrows ▶▶▶▷▷▷", "Diamonds ◆◆◆◇◇◇", "Pills ▰▰▰▱▱▱", "Shades ▓▓▓░░░", "Small Squares ▪▪▪▫▫▫", "Notes ♪♪♪···",
-            "Moon ●●◐○○○", "Knob ───◉───", "Hash [###...]"
+            "Moon ●●◐○○○", "Hash [###...]"
         };
-        const string BarDone = "━█■●♥★=▶◆▰▓▪♪●─#", BarKnob = "●\0\0\0\0\0>\0\0\0\0\0\0◐◉\0", BarRest = "─░□○♡☆-▷◇▱░▫·○─.";
-        const string BarLeft = "\0\0\0\0\0\0[\0\0\0\0\0\0\0\0[", BarRight = "\0\0\0\0\0\0]\0\0\0\0\0\0\0\0]";
+        const string BarDone = "━█■●♥★=▶◆▰▓▪♪●#", BarKnob = "●\0\0\0\0\0>\0\0\0\0\0\0◐\0", BarRest = "─░□○♡☆-▷◇▱░▫·○.";
+        const string BarLeft = "\0\0\0\0\0\0[\0\0\0\0\0\0\0[", BarRight = "\0\0\0\0\0\0]\0\0\0\0\0\0\0]";
         public static int Bar;
         const int MaxLength = 144;          // VRChat's limit for one message
         const double MinGap = 2, Repeat = 10;
@@ -10030,7 +10031,9 @@ namespace DinoVisualizer
             YouTubeAccount.OpenInMusic = Settings.Num("ytmusic", 1) != 0;
             VrcChatbox.Port = (int)Settings.Num("vrcport", 9000);
             VrcChatbox.Mode = Clamp(Settings.Num("vrchat", 0), VrcChatbox.Names.Length);
-            VrcChatbox.Bar = Clamp(Settings.Num("vrcbar", 0), VrcChatbox.BarNames.Length);
+            // The bar's look; from before Knob was taken out (it was 14), the ones after it move down one.
+            int oldBar = (int)Settings.Num("vrcbar", 0);
+            VrcChatbox.Bar = Clamp(Settings.Num("vrcbar2", oldBar == 14 ? 0 : oldBar > 14 ? oldBar - 1 : oldBar), VrcChatbox.BarNames.Length);
             VrcChatbox.Adlibs = Clamp(Settings.Num("vrcadlibs", 0), VrcChatbox.AdlibNames.Length);
             VrcChatbox.Restore(Settings.Num("vrcstatus", 0) != 0, (int)Settings.Num("vrcstatuscycle", 0), (int)Settings.Num("vrcstatusidx", 0));
             Updater.Mode = Clamp(Settings.Num("updates", 0), Updater.Names.Length);
@@ -10100,6 +10103,7 @@ namespace DinoVisualizer
                 // minutes.
                 uiTicks++;
                 if (uiTicks == 40 || uiTicks % 1200 == 0) Ram.Trim();
+                StepSleep();
                 // Updates: looked for 30 seconds after starting, then every 6 hours.
                 if (Updater.Mode != 2 && (uiTicks == 60 || uiTicks % 43200 == 0)) Updater.Check();
                 // The moment Equalizer APO turns up (just installed), the saved bands are handed to it.
@@ -10274,6 +10278,12 @@ namespace DinoVisualizer
                     if (i == 1 && Updater.Now == Updater.Step.Available) Updater.Install();
                 }
             });
+            // Pauses the music after a while (fading it out first); the top bar counts down.
+            options.Rows.Add(new OptionsPanel.Row
+            {
+                Label = "Sleep Timer:", Choices = SleepNames, Current = () => sleepIdx,
+                Choose = SetSleep
+            });
             // Starts when you sign in to Windows, with the window open or just in the tray.
             options.Rows.Add(new OptionsPanel.Row
             {
@@ -10289,7 +10299,7 @@ namespace DinoVisualizer
             options.Rows.Add(new OptionsPanel.Row
             {
                 Label = "Chatbox Bar:", Choices = VrcChatbox.BarNames, Current = () => VrcChatbox.Bar,
-                Choose = i => { VrcChatbox.Bar = i; Settings.Set("vrcbar", i); VrcChatbox.Tick(current); }
+                Choose = i => { VrcChatbox.Bar = i; Settings.Set("vrcbar2", i); VrcChatbox.Tick(current); }
             });
             options.Rows.Add(new OptionsPanel.Row
             {
@@ -10434,7 +10444,7 @@ namespace DinoVisualizer
             UpdateStrawberry();
             bool any = !string.IsNullOrEmpty(current.Title);
             top.State = !any ? "Idle" : current.Playing ? "Playing" : "Paused";
-            top.Line2 = "Widget: " + (widget == null ? "Off" : StyleNames[widget.Style + 1]) + "   (Ctrl+F11 shows or hides it)";
+            top.Line2 = "Widget: " + (widget == null ? "Off" : StyleNames[widget.Style + 1]) + "   (Ctrl+F11 shows or hides it)" + SleepNote();
             top.Invalidate();
             widgetButton.Text = widget == null ? "Show Widget" : "Hide Widget";
             bottom.Invalidate();
@@ -10516,6 +10526,66 @@ namespace DinoVisualizer
             Show();
             if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
             Activate();
+        }
+
+        // ---- The sleep timer: when it runs out the music pauses. Over its last 30 seconds the player's own volume fades
+        // down, and a moment after the pause it goes back to where it was, ready for next time. It isn't remembered
+        // between launches.
+
+        static readonly string[] SleepNames = { "Off", "15 min", "30 min", "45 min", "1 hour", "1.5 hours", "2 hours" };
+        static readonly int[] SleepMinutes = { 0, 15, 30, 45, 60, 90, 120 };
+        static readonly TimeSpan SleepFade = TimeSpan.FromSeconds(30);
+        int sleepIdx;
+        DateTime sleepAt, restoreAt;   // when the music pauses; when its volume goes back (MinValue: not waiting)
+        float fadeFrom = -1;           // the player's volume when the fade began (-1: not fading)
+
+        void SetSleep(int i)
+        {
+            sleepIdx = i;
+            sleepAt = i == 0 ? DateTime.MinValue : DateTime.UtcNow.AddMinutes(SleepMinutes[i]);
+            if (fadeFrom >= 0 && watcher != null) watcher.SetVolume(fadeFrom);   // changed partway through a fade
+            fadeFrom = -1;
+            restoreAt = DateTime.MinValue;
+            UpdateStatus();
+        }
+
+        string SleepNote()
+        {
+            if (sleepAt == DateTime.MinValue) return "";
+            var left = sleepAt - DateTime.UtcNow;
+            return "   ·   Sleep in " + Util.Clock(left > TimeSpan.Zero ? left : TimeSpan.Zero);
+        }
+
+        // Twice a second.
+        void StepSleep()
+        {
+            var now = DateTime.UtcNow;
+            if (restoreAt != DateTime.MinValue && now >= restoreAt)
+            {
+                if (watcher != null && fadeFrom >= 0) watcher.SetVolume(fadeFrom);
+                fadeFrom = -1;
+                restoreAt = DateTime.MinValue;
+            }
+            if (sleepAt == DateTime.MinValue) return;
+            var left = sleepAt - now;
+            if (left > TimeSpan.Zero)
+            {
+                if (left <= SleepFade && watcher != null && current.Playing)
+                {
+                    if (fadeFrom < 0 && current.Volume > 0) fadeFrom = current.Volume;
+                    if (fadeFrom >= 0) watcher.SetVolume(fadeFrom * (float)(left.TotalSeconds / SleepFade.TotalSeconds));
+                }
+            }
+            else
+            {
+                // Time's up: pause, then put the volume back once the player has stopped.
+                if (current.Playing) Send(MediaWatcher.PlayPause);
+                if (fadeFrom >= 0) restoreAt = now.AddSeconds(2);
+                sleepIdx = 0;
+                sleepAt = DateTime.MinValue;
+                options.Invalidate();
+            }
+            UpdateStatus();
         }
 
         // ---- Updates (see Updater): the button in the bottom bar says where it's got to.

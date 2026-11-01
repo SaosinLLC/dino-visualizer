@@ -186,7 +186,6 @@ There are three options:
   - *Small Squares* `▪▪▪▫▫▫▫▫▫▫`
   - *Notes* `♪♪♪·······`
   - *Moon* `●●●◐○○○○○○○`
-  - *Knob* `───◉───────`
   - *Hash* `[###.......]`
 
   If one shows as boxes in VRChat, *Classic* and *Hash* are plain text and always work.
@@ -237,6 +236,10 @@ Technical details:
 - **Equalizer**: turns the equalizer on or off.
 - **EQ Preset**: one of the 14 equalizer presets, or *Custom* after you move a slider. Picking one switches to the Equalizer tab.
 - **Close To Tray**: on (the default), closing the window keeps the app running in the tray; off, closing the window quits.
+- **Sleep Timer**: *Off*, *15 min*, *30 min*, *45 min*, *1 hour*, *1.5 hours* or *2 hours*. When the time's up, the music pauses.
+  - Over the last 30 seconds the player's own volume fades down; a moment after the pause it goes back to where it was.
+  - The top bar counts down (`Sleep in 00:29:59`).
+  - It isn't remembered when the app restarts.
 - **Updates**: what happens when there's a new version (see [Updates](#updates)).
   - *Notify Me* (the default): the update button at the bottom says so, and the tray tells you once.
   - *Install Automatically*: it updates and restarts by itself.
@@ -246,7 +249,7 @@ Technical details:
   - If you move the app's folder, open the app once from the new place and the entry follows it.
 - **VRChat Chatbox**: *Off*, *Song*, *Song + Time*, *Song + Progress Bar*, or any of those with the lyrics. It shows what's playing above your head in VRChat (see [VRChat chatbox](#vrchat-chatbox)).
 - **Chatbox Adlibs**: how background vocals and adlibs look in the chatbox's lyrics: *Tiny*, *Small Caps*, *Normal* or *Hidden*.
-- **Chatbox Bar**: how the chatbox's progress bar looks. There are 16 styles, from *Line* to *Hash*; each choice in the list shows a sample.
+- **Chatbox Bar**: how the chatbox's progress bar looks. There are 15 styles, from *Line* to *Hash*; each choice in the list shows a sample.
 - **Scanlines**, **Color Preset**, **Accent Hue**, **Accent Saturation**: the same look controls as Dino Monitor.
 - **Hue Cycle**: *Off*, *Slow*, *Medium* or *Fast*. The accent color keeps turning round the color wheel: a full turn takes 2 minutes, 40 seconds or 12 seconds. Everything that follows the accent color turns with it, including the window, the visualizer and the widget's tinted styles.
 - **Random Colors**: *Off*, *On Beats*, *Every 5 s* or *Every 15 s*. The accent color glides to a new random color on the music's beats (at most twice a second, and at least every 3 seconds while music plays, in case a song has no clear beats) or on a timer, and with more than one color the palette is reshuffled to random spots on the color wheel. It works together with Hue Cycle.
@@ -287,7 +290,7 @@ powershell -ExecutionPolicy Bypass -File release.ps1 -Version 1.0.1 -Notes "Smal
 
 It does everything in one go:
 1. Puts the version in the source.
-2. Builds the exe. Exit the app first so the exe can be replaced.
+2. Builds the exe (in `_release`, so the app can stay running; a running copy updates itself from the release).
 3. Commits and pushes the code.
 4. Makes a GitHub release with `DinoVisualizer.exe` attached.
 

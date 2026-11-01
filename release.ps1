@@ -4,7 +4,8 @@ param(
 )
 # Publishes a new version: puts the version number in the source, builds DinoVisualizer.exe, commits and pushes the
 # code, and makes a GitHub release with the exe attached. Copies of the app that are running find it on their next
-# check (or when Check For Updates is clicked) and update themselves.
+# check (or when Check For Updates is clicked) and update themselves. It's built in _release, so the app can stay
+# running; the copy in this folder is replaced too if it isn't (otherwise it updates itself like the others).
 $ErrorActionPreference = 'Stop'
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "The version should look like 1.2.3" }
 $git = 'C:\Program Files\Git\cmd\git.exe'
@@ -15,10 +16,11 @@ $text = [IO.File]::ReadAllText($src)
 $text = [regex]::Replace($text, 'AssemblyVersion\("[^"]*"\)', "AssemblyVersion(""$Version.0"")")
 [IO.File]::WriteAllText($src, $text, (New-Object Text.UTF8Encoding $true))
 
-$exe = "$PSScriptRoot\DinoVisualizer.exe"
-$before = if (Test-Path $exe) { (Get-Item $exe).LastWriteTimeUtc } else { [DateTime]::MinValue }
-& "$PSScriptRoot\build.ps1"
-if (-not (Test-Path $exe) -or (Get-Item $exe).LastWriteTimeUtc -le $before) { throw "The build failed (is the app still running? Exit it from the tray first)" }
+$exe = "$PSScriptRoot\_release\DinoVisualizer.exe"
+New-Item -ItemType Directory -Force (Split-Path $exe) | Out-Null
+if (Test-Path $exe) { Remove-Item $exe }
+& "$PSScriptRoot\build.ps1" -Out $exe
+if (-not (Test-Path $exe)) { throw "The build failed" }
 $built = [Reflection.AssemblyName]::GetAssemblyName($exe).Version
 if ($built.ToString(3) -ne $Version) { throw "The exe says version $built, not $Version" }
 
@@ -29,6 +31,11 @@ if ($built.ToString(3) -ne $Version) { throw "The exe says version $built, not $
 if ($LASTEXITCODE -ne 0) { throw "Pushing to GitHub failed" }
 
 if ($Notes -eq "") { $Notes = "Dino Visualizer $Version" }
-& $gh release create "v$Version" $exe --repo (& $git -C $PSScriptRoot remote get-url origin) --title "Dino Visualizer $Version" --notes $Notes
+Push-Location $PSScriptRoot   # gh finds the repo from this folder's git remote
+try { & $gh release create "v$Version" $exe --title "Dino Visualizer $Version" --notes $Notes }
+finally { Pop-Location }
 if ($LASTEXITCODE -ne 0) { throw "Making the GitHub release failed" }
+
+try { Copy-Item $exe "$PSScriptRoot\DinoVisualizer.exe" -Force -ErrorAction Stop; Write-Host "Updated DinoVisualizer.exe here too" }
+catch { Write-Host "DinoVisualizer.exe here is running; it'll update itself from the release (or click Check For Updates)" }
 Write-Host "Released Dino Visualizer $Version"
