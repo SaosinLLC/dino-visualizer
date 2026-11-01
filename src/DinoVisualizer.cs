@@ -19,7 +19,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.1.0")]
 [assembly: System.Reflection.AssemblyTitle("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyProduct("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyCompany("Saosin LLC")]
@@ -4350,49 +4350,6 @@ namespace DinoVisualizer
         [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int MouseScaleFn(ulong handle, ref Vector2 scale);
         [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int FromFileFn(ulong handle, IntPtr path);
         [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int TextureFn(ulong handle, ref Texture texture);
-        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int PathFn(IntPtr path);
-        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int NamedHandleFn(IntPtr name, ref ulong handle);
-        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int UpdateActionsFn([In, Out] ActiveActionSet[] sets, uint size, uint count);
-        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int DigitalFn(ulong action, ref DigitalAction data, uint size, ulong restrictToDevice);
-
-        // VRActiveActionSet_t and InputDigitalActionData_t (SteamVR Input).
-        [StructLayout(LayoutKind.Sequential)]
-        public struct ActiveActionSet { public ulong Set, RestrictedToDevice, Secondary; public uint Padding; public int Priority; }
-
-        [StructLayout(LayoutKind.Sequential)]
-        public struct DigitalAction
-        {
-            [MarshalAs(UnmanagedType.I1)] public bool Active;
-            public ulong Origin;
-            [MarshalAs(UnmanagedType.I1)] public bool State;
-            [MarshalAs(UnmanagedType.I1)] public bool Changed;
-            public float UpdateTime;
-        }
-
-        // SteamVR Input (IVRInput_011): the app's own actions, read alongside the game's. Null if SteamVR has no such
-        // interface (the gestures that use it are then left out).
-        public static PathFn SetActionManifest;
-        public static NamedHandleFn ActionSetHandle, ActionHandle, SourceHandle;
-        public static UpdateActionsFn UpdateActions;
-        public static DigitalFn Digital;
-
-        // A UTF-8 copy of a string for SteamVR (free it with Marshal.FreeHGlobal).
-        public static IntPtr Utf8(string s)
-        {
-            var bytes = System.Text.Encoding.UTF8.GetBytes(s + "\0");
-            IntPtr p = Marshal.AllocHGlobal(bytes.Length);
-            Marshal.Copy(bytes, 0, p, bytes.Length);
-            return p;
-        }
-
-        // A handle by name (an action set, an action or an input source); 0 if SteamVR doesn't know it.
-        public static ulong Handle(NamedHandleFn fn, string name)
-        {
-            IntPtr p = Utf8(name);
-            try { ulong h = 0; return fn(p, ref h) == 0 ? h : 0; }
-            finally { Marshal.FreeHGlobal(p); }
-        }
-
         // Texture_t: a Direct3D 11 texture (type 0) in gamma color space (1), as GDI draws.
         [StructLayout(LayoutKind.Sequential)]
         public struct Texture { public IntPtr Handle; public int Type, ColorSpace; }
@@ -4504,18 +4461,6 @@ namespace DinoVisualizer
                 SetMouseScale = Fn<MouseScaleFn>(overlay, 52);
                 SetFromFile = Fn<FromFileFn>(overlay, 63);
                 SetTexture = Fn<TextureFn>(overlay, 60);
-                int inputError = 0;
-                IntPtr input = GetGenericInterface("FnTable:IVRInput_011", ref inputError);
-                if (inputError == 0 && input != IntPtr.Zero)
-                {
-                    SetActionManifest = Fn<PathFn>(input, 0);
-                    ActionSetHandle = Fn<NamedHandleFn>(input, 1);
-                    ActionHandle = Fn<NamedHandleFn>(input, 2);
-                    SourceHandle = Fn<NamedHandleFn>(input, 3);
-                    UpdateActions = Fn<UpdateActionsFn>(input, 4);
-                    Digital = Fn<DigitalFn>(input, 5);
-                }
-                else SetActionManifest = null;
                 Running = true;
                 return true;
             }
@@ -4729,9 +4674,8 @@ namespace DinoVisualizer
             OpenVr.SetSortOrder(overlay, 10);
             OpenVr.SetAlpha(overlay, 0);
             Pointable(overlay);
-            SetUpInput();
             alpha = 0;
-            shown = facing = moving = resizing = wasFist = false;
+            shown = facing = moving = resizing = false;
             attached = OpenVr.NoDevice;
             card = new NowPlayingWidget(1.2f, look) { LevelSource = LevelSource, Visualizer = visualizer };
             card.Command += slot => { if (Command != null) Command(slot); };
@@ -4848,13 +4792,9 @@ namespace DinoVisualizer
             var wrist = poses[hand].DeviceToAbsolute;
             var mount = moving ? moveMount : customMount.HasValue ? customMount.Value : Mount(place, OffsetX, OffsetY, OffsetZ, Roll);
             var world = Multiply(wrist, mount);
-            if (inputReady)
-            {
-                var sets = new[] { new OpenVr.ActiveActionSet { Set = actionSet } };
-                OpenVr.UpdateActions(sets, (uint)Marshal.SizeOf(typeof(OpenVr.ActiveActionSet)), 1);
-                Grabbing(wrist, other, otherValid, ref mount, ref world);
-            }
+            Carrying(wrist, other, otherValid, ref mount, ref world);
             Resizing(other, otherValid);
+            lastMount = mount;
             if (hand != attached || mountDirty)
             {
                 OpenVr.SetRelative(overlay, hand, ref mount);
@@ -4888,19 +4828,21 @@ namespace DinoVisualizer
             uint size = (uint)Marshal.SizeOf(typeof(OpenVr.Event));
             while (OpenVr.PollOverlayEvent(overlay, ref e, size))
             {
-                if (e.Type == OpenVr.FocusLeave) { card.HoverButton = stripHover = -1; EndResize(); continue; }
-                if (e.Type == OpenVr.MouseUp) { EndResize(); continue; }
+                if (e.Type == OpenVr.FocusLeave) { card.HoverButton = stripHover = -1; EndResize(); EndMove(); continue; }
+                if (e.Type == OpenVr.MouseUp) { EndResize(); EndMove(); continue; }
                 if (e.Type != OpenVr.MouseMove && e.Type != OpenVr.MouseDown) continue;
                 float x = OpenVr.First(e), y = texHeight - OpenVr.Second(e);
                 bool click = e.Type == OpenVr.MouseDown && OpenVr.Button(e) == OpenVr.LeftButton && alpha > 0.5f;
                 if (y >= cardTexHeight)
                 {
-                    // The strip under the card.
+                    // The strip under the card, with the handle at its end.
                     var buttons = StripButtons(texWidth, cardTexHeight, texHeight - cardTexHeight);
                     int at = Array.FindIndex(buttons, r => r.Contains((int)x, (int)y));
+                    if (HandleRect(texWidth, cardTexHeight, texHeight - cardTexHeight).Contains((int)x, (int)y)) at = HandleIndex;
                     card.HoverButton = -1;
                     stripHover = at;
-                    if (click && at >= 0) StripButton(at);
+                    if (click && at == HandleIndex) GrabHandle();
+                    else if (click && at >= 0) StripButton(at);
                     continue;
                 }
                 stripHover = -1;
@@ -4918,116 +4860,55 @@ namespace DinoVisualizer
 
         // ---- Moving and resizing the card by hand.
         //
-        // A fist (the grip) with the other hand near the card picks it up: it follows that hand, and opening the hand
-        // leaves it there, still on the wrist (it moves with the arm from then on, and is remembered). Two fists in a
-        // row on it put it back where it started. Holding the trigger on the card (not on a button) and moving that
-        // hand resizes it: right or up for bigger, left or down for smaller.
-        //
-        // The fist comes from SteamVR Input: the app has one action, "grab", bound by default to the grip (a squeeze on
-        // Index controllers, the grip button on Touch and Vive ones). It can be rebound in SteamVR's controller settings.
+        // The handle at the card's corner (the end of the strip): holding the trigger on it picks the card up, so it
+        // follows the pointing hand, and letting go leaves it there, still on the wrist (it moves with the arm from
+        // then on, and is remembered). Double-clicking the handle puts it back in its usual spot. Holding the trigger on
+        // the card itself (not on a button) and moving that hand resizes it: right or up for bigger, left or down for
+        // smaller.
 
-        bool inputReady, moving, resizing, wasFist, mountDirty;
-        ulong actionSet, grabAction, leftSource, rightSource;
+        bool moving, resizing, mountDirty;
         OpenVr.Matrix34? customMount;     // where the card was left on the wrist (null: its usual spot)
-        OpenVr.Matrix34 moveMount, grabOffset, lastWorld;
-        DateTime lastFist;
+        OpenVr.Matrix34 moveMount, grabOffset, lastWorld, lastMount;
+        DateTime lastHandleDown;
         float resizeWidth;
         float[] resizeFrom, resizeRight, resizeUp;
 
-        const string Actions = @"{
-  ""default_bindings"": [
-    { ""controller_type"": ""knuckles"", ""binding_url"": ""bindings_knuckles.json"" },
-    { ""controller_type"": ""oculus_touch"", ""binding_url"": ""bindings_oculus_touch.json"" },
-    { ""controller_type"": ""vive_controller"", ""binding_url"": ""bindings_vive_controller.json"" }
-  ],
-  ""actions"": [ { ""name"": ""/actions/dino/in/grab"", ""type"": ""boolean"" } ],
-  ""action_sets"": [ { ""name"": ""/actions/dino"", ""usage"": ""leftright"" } ],
-  ""localization"": [ { ""language_tag"": ""en_US"", ""/actions/dino"": ""Dino Visualizer"", ""/actions/dino/in/grab"": ""Grab the wrist card"" } ]
-}";
-
-        // A binding file: the grip on both hands, as a squeeze (Index) or a click (the others).
-        static string Binding(string controller, string mode, string input)
+        // The trigger went down on the handle: picked up, or (a double-click) put back.
+        void GrabHandle()
         {
-            string source = @"{ ""path"": ""/user/hand/HAND/input/grip"", ""mode"": ""MODE"", ""inputs"": { ""INPUT"": { ""output"": ""/actions/dino/in/grab"" } } }"
-                .Replace("MODE", mode).Replace("INPUT", input);
-            return @"{ ""action_manifest_version"": 0, ""controller_type"": """ + controller + @""", ""name"": ""Dino Visualizer"", ""description"": ""Grip grabs the wrist card"",
-  ""bindings"": { ""/actions/dino"": { ""sources"": [ " + source.Replace("HAND", "left") + ", " + source.Replace("HAND", "right") + " ] } } }";
-        }
-
-        void SetUpInput()
-        {
-            inputReady = false;
-            if (OpenVr.SetActionManifest == null) return;
-            try
+            if ((DateTime.UtcNow - lastHandleDown).TotalSeconds < 0.5)
             {
-                string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Dino Visualizer", "vr");
-                Directory.CreateDirectory(folder);
-                File.WriteAllText(Path.Combine(folder, "actions.json"), Actions);
-                File.WriteAllText(Path.Combine(folder, "bindings_knuckles.json"), Binding("knuckles", "grab", "grab"));
-                File.WriteAllText(Path.Combine(folder, "bindings_oculus_touch.json"), Binding("oculus_touch", "button", "click"));
-                File.WriteAllText(Path.Combine(folder, "bindings_vive_controller.json"), Binding("vive_controller", "button", "click"));
-                IntPtr path = OpenVr.Utf8(Path.Combine(folder, "actions.json"));
-                try { if (OpenVr.SetActionManifest(path) != 0) return; }
-                finally { Marshal.FreeHGlobal(path); }
-                actionSet = OpenVr.Handle(OpenVr.ActionSetHandle, "/actions/dino");
-                grabAction = OpenVr.Handle(OpenVr.ActionHandle, "/actions/dino/in/grab");
-                leftSource = OpenVr.Handle(OpenVr.SourceHandle, "/user/hand/left");
-                rightSource = OpenVr.Handle(OpenVr.SourceHandle, "/user/hand/right");
-                inputReady = actionSet != 0 && grabAction != 0 && leftSource != 0 && rightSource != 0;
-            }
-            catch { inputReady = false; }
-        }
-
-        bool Fist(ulong hand)
-        {
-            var d = new OpenVr.DigitalAction();
-            return OpenVr.Digital(grabAction, ref d, (uint)Marshal.SizeOf(typeof(OpenVr.DigitalAction)), hand) == 0 && d.Active && d.State;
-        }
-
-        // The other hand's controller tip (7 cm ahead of its middle) close to the card's middle.
-        bool Near(OpenVr.Matrix34 hand, OpenVr.Matrix34 card)
-        {
-            float x = hand.M3 - hand.M2 * 0.07f - card.M3, y = hand.M7 - hand.M6 * 0.07f - card.M7, z = hand.M11 - hand.M10 * 0.07f - card.M11;
-            return Math.Sqrt(x * x + y * y + z * z) < Math.Max(0.15f, width * 0.75f);
-        }
-
-        // The fist: picking the card up, carrying it, leaving it, or (twice quickly) putting it back.
-        void Grabbing(OpenVr.Matrix34 wrist, uint other, bool otherValid, ref OpenVr.Matrix34 mount, ref OpenVr.Matrix34 world)
-        {
-            bool fist = otherValid && Fist(place <= 2 ? rightSource : leftSource);
-            bool down = fist && !wasFist;
-            wasFist = fist;
-            if (down && alpha > 0.3f && Near(poses[other].DeviceToAbsolute, world))
-            {
-                if ((DateTime.UtcNow - lastFist).TotalSeconds < 0.5)
-                {
-                    // The second fist straight after the first: back to its usual spot.
-                    lastFist = DateTime.MinValue;
-                    moving = false;
-                    ResetMount();
-                    mount = Mount(place, OffsetX, OffsetY, OffsetZ, Roll);
-                    world = Multiply(wrist, mount);
-                    if (Adjusted != null) Adjusted();
-                    return;
-                }
-                lastFist = DateTime.UtcNow;
-                moving = true;
-                moveMount = mount;
-                grabOffset = Multiply(Inverse(poses[other].DeviceToAbsolute), world);
-            }
-            if (!moving) return;
-            if (!fist)
-            {
-                // Let go: it stays there on the wrist.
+                lastHandleDown = DateTime.MinValue;
                 moving = false;
-                customMount = moveMount;
-                mountDirty = true;
+                ResetMount();
                 if (Adjusted != null) Adjusted();
                 return;
             }
+            lastHandleDown = DateTime.UtcNow;
+            uint other = OpenVr.RoleIndex(place <= 2 ? OpenVr.RightHand : OpenVr.LeftHand);
+            if (other >= OpenVr.MaxDevices || !poses[other].Valid) return;
+            moving = true;
+            moveMount = lastMount;
+            grabOffset = Multiply(Inverse(poses[other].DeviceToAbsolute), lastWorld);
+        }
+
+        // Each frame while it's held: carried by the pointing hand, its spot on the wrist following.
+        void Carrying(OpenVr.Matrix34 wrist, uint other, bool otherValid, ref OpenVr.Matrix34 mount, ref OpenVr.Matrix34 world)
+        {
+            if (!moving || !otherValid) return;
             world = Multiply(poses[other].DeviceToAbsolute, grabOffset);
             mount = moveMount = Multiply(Inverse(wrist), world);
             mountDirty = true;
+        }
+
+        // Let go: it stays there on the wrist.
+        void EndMove()
+        {
+            if (!moving) return;
+            moving = false;
+            customMount = moveMount;
+            mountDirty = true;
+            if (Adjusted != null) Adjusted();
         }
 
         void StartResize()
@@ -5128,7 +5009,7 @@ namespace DinoVisualizer
         void Upload()
         {
             int w = texWidth, h = texHeight;
-            var bgra = Picture(card, clock.Elapsed.TotalSeconds, Gpu.Ready ? int.MaxValue : OpenVr.RawLimit, stripHover, windowOpen,
+            var bgra = Picture(card, clock.Elapsed.TotalSeconds, Gpu.Ready ? int.MaxValue : OpenVr.RawLimit, moving ? HandleIndex : stripHover, windowOpen,
                                out texWidth, out texHeight, out cardTexHeight, out texScale);
             var pin = GCHandle.Alloc(bgra, GCHandleType.Pinned);
             bool sent;
@@ -5500,19 +5381,29 @@ namespace DinoVisualizer
         // ---- Under the card, a strip of buttons for the wrist itself, clicked with the laser like the card's own:
         // the app's window (open or close it), smaller and bigger, and rotate the card on the wrist.
         static readonly string[] StripLabels = { "Open App", "Smaller", "Bigger", "Rotate L", "Rotate R" };
-        const int OpenApp = 0, CardSmaller = 1, CardBigger = 2, RotateLeft = 3, RotateRight = 4;
-        int stripHover = -1;
+        const int OpenApp = 0, CardSmaller = 1, CardBigger = 2, RotateLeft = 3, RotateRight = 4, HandleIndex = 5;
+        int stripHover = -1;     // the strip button (or the handle, HandleIndex) under the laser
         int cardTexHeight = 1;   // the card part of the texture (the strip's below it)
 
         static int StripHeight(int width) { return Math.Max(40, width / 9); }
 
-        // The strip's buttons, side by side across its full width.
+        static int StripGap(int width) { return Math.Max(4, width / 120); }
+
+        // The strip's buttons, side by side, leaving a square at the right-hand end for the handle.
         static Rectangle[] StripButtons(int width, int top, int height)
         {
-            int n = StripLabels.Length, gap = Math.Max(4, width / 120), w = (width - gap * (n + 1)) / n;
+            int n = StripLabels.Length, gap = StripGap(width), side = height - 2 * gap;
+            int w = (width - side - gap * (n + 2)) / n;
             var r = new Rectangle[n];
-            for (int i = 0; i < n; i++) r[i] = new Rectangle(gap + i * (w + gap), top + gap, w, height - 2 * gap);
+            for (int i = 0; i < n; i++) r[i] = new Rectangle(gap + i * (w + gap), top + gap, w, side);
             return r;
+        }
+
+        // The handle: the square at the strip's right-hand end, the card's corner.
+        static Rectangle HandleRect(int width, int top, int height)
+        {
+            int gap = StripGap(width), side = height - 2 * gap;
+            return new Rectangle(width - gap - side, top + gap, side, side);
         }
 
         void StripButton(int button)
@@ -5615,6 +5506,23 @@ namespace DinoVisualizer
                         using (var p = new Pen(Color.FromArgb(220, lit ? Theme.Bright : Theme.Primary), Math.Max(2, height / 20))) g.DrawRectangle(p, buttons[i]);
                         string label = i == OpenApp && appOpen ? "Close App" : StripLabels[i];
                         using (var b = new SolidBrush(lit ? Color.White : Theme.Bright)) g.DrawString(label, font, b, buttons[i], center);
+                    }
+                    // The handle: a brighter square with a four-way arrow, for picking the card up.
+                    var handle = HandleRect(width, 0, height);
+                    bool held = hover == HandleIndex;
+                    using (var b = new SolidBrush(Color.FromArgb(held ? 170 : 120, Theme.Primary))) g.FillRectangle(b, handle);
+                    using (var p = new Pen(Color.FromArgb(235, held ? Color.White : Theme.Bright), Math.Max(2, height / 20))) g.DrawRectangle(p, handle);
+                    float cx = handle.X + handle.Width / 2f, cy = handle.Y + handle.Height / 2f, arm = handle.Width * 0.3f, head = handle.Width * 0.1f;
+                    using (var p = new Pen(held ? Color.White : Theme.Bright, Math.Max(2, height / 16)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                    {
+                        g.DrawLine(p, cx - arm, cy, cx + arm, cy);
+                        g.DrawLine(p, cx, cy - arm, cx, cy + arm);
+                        foreach (var d in new[] { new PointF(1, 0), new PointF(-1, 0), new PointF(0, 1), new PointF(0, -1) })
+                        {
+                            float tx = cx + d.X * arm, ty = cy + d.Y * arm;   // each arm's tip, with a small arrowhead
+                            g.DrawLine(p, tx, ty, tx - d.X * head + d.Y * head, ty - d.Y * head + d.X * head);
+                            g.DrawLine(p, tx, ty, tx - d.X * head - d.Y * head, ty - d.Y * head - d.X * head);
+                        }
                     }
                 }
                 var data = strip.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
