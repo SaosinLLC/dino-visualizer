@@ -19,7 +19,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.0.1.0")]
+[assembly: System.Reflection.AssemblyVersion("1.0.2.0")]
 [assembly: System.Reflection.AssemblyTitle("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyProduct("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyCompany("Saosin LLC")]
@@ -2190,14 +2190,22 @@ namespace DinoVisualizer
             PlacePanel();
         }
 
-        // Windows style: the volume panel shows while the mouse is over either panel (or dragging it), fades out
-        // 2 seconds after the mouse leaves, and fades back in on hover. (The Dino style always shows its slider.)
-        DateTime volumeUntil = DateTime.UtcNow.AddSeconds(2);
-        float panelFade = 1;   // 0 hidden .. 1 fully shown
+        // Windows style: the volume panel is hidden until the mouse is over its spot or the volume changes (the mouse
+        // wheel, dragging, or the player or Windows changing it). It fades out 2 seconds after the mouse leaves or the
+        // volume settles. The mouse over its spot is looked for every frame, since the panel gets no mouse events while
+        // it's hidden. (The Dino style always shows its slider.)
+        DateTime volumeUntil;
+        float panelFade;       // 0 hidden .. 1 fully shown
+        float seenVolume = -1; // the volume last frame, to notice it changing
         VolumePanel panel;
         internal bool panelHover;
 
-        bool VolumeShown { get { return hovering || panelHover || draggingVolume || DateTime.UtcNow < volumeUntil; } }
+        bool VolumeShown { get { return panelHover || draggingVolume || OverPanelSpot || DateTime.UtcNow < volumeUntil; } }
+
+        bool OverPanelSpot
+        {
+            get { return win && IsHandleCreated && new Rectangle(Left + WinLeft.X, Top + WinLeft.Y, WinLeft.Width, WinLeft.Height).Contains(Cursor.Position); }
+        }
 
         internal void KeepVolume() { volumeUntil = DateTime.UtcNow.AddSeconds(2); }
 
@@ -2379,6 +2387,9 @@ namespace DinoVisualizer
             // Windows style: the volume panel fades in quickly (~0.15 s) and out gently (~0.5 s).
             if (win)
             {
+                float vol = ShownVolume;   // -1 while the player is silent: starting or stopping isn't a change
+                if (vol >= 0 && seenVolume >= 0 && Math.Abs(vol - seenVolume) > 0.004f) KeepVolume();
+                seenVolume = vol;
                 float target = VolumeShown ? 1 : 0;
                 if (panelFade != target)
                 {
@@ -4102,8 +4113,7 @@ namespace DinoVisualizer
             base.OnMouseMove(e);
             if (corner >= 0) { ResizeFromCorner(); return; }
             if (!hovering) { hovering = true; Invalidate(); }
-            KeepVolume();
-            if (draggingVolume) { if (win) SlideVolumeVertical(e.Y); else SlideVolume(e.X); return; }
+            if (draggingVolume) { KeepVolume(); if (win) SlideVolumeVertical(e.Y); else SlideVolume(e.X); return; }
             if (seeking) { seekPreview = PositionAt(e.X); Invalidate(); return; }
             if (dragging) { Location = new Point(Location.X + e.X - dragFrom.X, Location.Y + e.Y - dragFrom.Y); return; }
             if (win)
@@ -4131,7 +4141,6 @@ namespace DinoVisualizer
             hoverButton = xpWinHover = -1;
             volumeHover = progressHover = false;
             hovering = false;
-            KeepVolume();   // the 5 seconds count from when the mouse leaves
             Invalidate();
         }
 

@@ -142,7 +142,7 @@ How it works: the bands are saved in `DinoVisualizer.txt` in Equalizer APO's con
 `Ctrl+F11` from anywhere shows or hides it, in the last style picked. Every style shows the song with album art, and the player buttons and volume control that player. The volume control (and the mouse wheel over the card) sets just that app's own volume. Move the widget by grabbing its middle, and drag any corner to resize it (60% to 250%). It remembers its spot, size and style, never takes focus from what you're doing, and shows up in recordings and streams whenever it's inside the captured area.
 
 - **Dino Style**: a small card in the app's own look, with a progress bar you can click or drag to seek, and a volume slider.
-- **Windows Style**: like the Windows 10 media flyout. Its volume panel fades away 2 seconds after the mouse leaves and fades back in when you hover over it.
+- **Windows Style**: like the Windows 10 media flyout. Its volume panel stays hidden until you hover over its spot or the volume changes (the mouse wheel over the card, or the player or Windows changing it). It fades away 2 seconds later.
 - **Aero Style**: a glossy Frutiger Aero / Windows Vista gadget: sky-blue glass, a gloss highlight, green aurora swooshes, drifting bubbles, glass orb buttons and a reflection under the album art.
 - **XP Style**: a Windows XP-era media player. It has a curved Luna-blue wing with a drop-down to pick the visualizer, a metal frame around a black screen whose green visualizer (any of the 21 styles) follows the music, and a glossy control bar with a chrome play/pause orb. Three lights on the top strip work like window buttons:
   - **red** closes the widget;
