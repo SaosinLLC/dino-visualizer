@@ -19,7 +19,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.3.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.3.1.0")]
 [assembly: System.Reflection.AssemblyTitle("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyProduct("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyCompany("Saosin LLC")]
@@ -7727,8 +7727,10 @@ namespace DinoVisualizer
         public readonly List<LyricLine> Lines = new List<LyricLine>();
         public bool Synced, Instrumental, Searching;
         public string Problem;      // "notfound" or "offline"
-        public bool Retry;          // the service was busy or unreachable for part of the lookup: try again later
+        public bool Retry;          // the service was busy or unreachable for part of the lookup
         public DateTime FailedAt;
+        public int Misses;          // lookups in a row that found nothing (or couldn't get through)
+        public bool Looking;        // being looked up again, this result showing meanwhile
     }
 
     // Looks up the playing song's lyrics on LRCLIB (lrclib.net), a free, open lyrics database that needs no account or
@@ -7748,8 +7750,16 @@ namespace DinoVisualizer
 
         static string Key(NowPlayingInfo info) { return info.App + "|" + info.Artist + "|" + info.Title; }
 
-        // The lyrics for a song: what's known so far, starting a lookup if it hasn't been looked up (or a failed one is
-        // due another try).
+        // A song with no lyrics found (or the service out of reach) is looked up again a second after the last try
+        // ended, with what's known about it by then (a length or album that turned up late helps the exact match).
+        // After a minute of that it's every 30 seconds, so a song that really has none isn't asked about forever. While
+        // the service is busy or out of reach it's every 5 seconds instead (asking faster would only add to the load).
+        public const int QuickTries = 60;
+        static double RetryAfter(LyricsResult r) { return r.Retry ? 5 : r.Misses < QuickTries ? 1 : 30; }
+        static System.Threading.Timer nudge;   // asks for the lyrics again when a try is due (Changed)
+
+        // The lyrics for a song: what's known so far, starting a lookup if it hasn't been looked up (or one that found
+        // nothing is due another try).
         public static LyricsResult For(NowPlayingInfo info)
         {
             if (string.IsNullOrEmpty(info.Title)) return null;
@@ -7757,23 +7767,30 @@ namespace DinoVisualizer
             lock (sync)
             {
                 LyricsResult r;
-                if (found.TryGetValue(key, out r) && !(r.Retry && (DateTime.UtcNow - r.FailedAt).TotalSeconds > 30)) return r;
+                if (found.TryGetValue(key, out r) &&
+                    (r.Searching || r.Looking || r.Problem == null || DateTime.UtcNow < r.FailedAt.AddSeconds(RetryAfter(r)))) return r;
                 // Only the last few dozen songs are kept.
                 if (r == null)
                 {
                     remembered.Enqueue(key);
                     while (remembered.Count > 40) found.Remove(remembered.Dequeue());
+                    r = new LyricsResult { Searching = true };
+                    found[key] = r;
                 }
-                r = new LyricsResult { Searching = true };
-                found[key] = r;
+                else r.Looking = true;   // "not found" stays up while it looks again, so it doesn't flicker
+                int misses = r.Misses;
                 string title = info.Title, artist = info.Artist, album = info.Album, app = info.App;
                 int seconds = (int)Math.Round(info.Duration.TotalSeconds);
                 ThreadPool.QueueUserWorkItem(_ =>
                 {
                     var result = Look(title, artist, album, app, seconds);
+                    if (result.Problem != null) result.Misses = misses + 1;
                     lock (sync) if (found.ContainsKey(key)) found[key] = result;
                     var changed = Changed;
                     if (changed != null) changed();
+                    // Nothing yet: a nudge when the next try is due, in case nothing else asks before then.
+                    if (result.Problem != null && changed != null)
+                        nudge = new System.Threading.Timer(o => { var c = Changed; if (c != null) c(); }, null, (int)(RetryAfter(result) * 1000) + 50, Timeout.Infinite);
                 });
                 return r;
             }
@@ -10552,7 +10569,7 @@ namespace DinoVisualizer
             if (r.Searching) return "Searching";
             if (r.Instrumental && r.Lines.Count == 0) return "Instrumental";
             if (r.Problem == "offline") return "Offline";
-            if (r.Problem != null) return "Not Found";
+            if (r.Problem != null) return r.Misses < Lyrics.QuickTries ? "Still Looking" : "Not Found";
             return r.Synced ? "Synced" : "Not Synced";
         }
 
@@ -10597,6 +10614,8 @@ namespace DinoVisualizer
                            : r.Searching ? "Looking up the lyrics..."
                            : r.Lines.Count == 0 && r.Instrumental ? "This one's an instrumental: no words to show."
                            : r.Problem == "offline" ? "Can't reach the lyrics service right now. It tries again in a moment."
+                           : r.Problem != null && r.Retry ? "The lyrics service is busy. It tries again in a moment."
+                           : r.Problem != null && r.Misses < Lyrics.QuickTries ? "No lyrics found yet. Looking again every second..."
                            : r.Problem != null ? "No lyrics found for this song."
                            : null;
             if (message != null)

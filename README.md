@@ -40,11 +40,13 @@ Run **DinoVisualizer.exe**. It's a single file with nothing to install and no si
   - **Synced lyrics** follow along: the line being sung is lit up in the middle, with the lines around it dimmer, and the view scrolls smoothly as the song goes. Click any line to jump the song to it.
   - **Plain lyrics** (no timing) scroll through at the song's pace.
   - The mouse wheel scrolls by hand; the view drifts back to the song 4 seconds later.
-  - The top-right corner says *Synced*, *Not Synced*, *Searching*, *Not Found*, *Instrumental* or *Offline*.
+  - The top-right corner says *Synced*, *Not Synced*, *Searching*, *Still Looking*, *Not Found*, *Instrumental* or *Offline*.
 
   - **Lyrics + Visualizer** (in Options) shows both at once: the lyrics scroll over the visualizer, which is dimmed behind them so the words stay readable. It works on both the Visualizer tab and the Lyrics tab, with any visualizer style.
 
-  Lyrics come from [LRCLIB](https://lrclib.net), a free, open lyrics database (no account or key). Each song is looked up once, and only while lyrics are on screen or going to the VRChat chatbox; the lookup sends the song's title, artist, album and length. YouTube titles like "Artist - Song (Official Video)" and Spotify's "- Remastered 2011" endings are tidied up first so they're found. If the service is busy or you're offline, it tries again 30 seconds later.
+  Lyrics come from [LRCLIB](https://lrclib.net), a free, open lyrics database (no account or key). Songs are only looked up while lyrics are on screen or going to the VRChat chatbox; the lookup sends the song's title, artist, album and length. YouTube titles like "Artist - Song (Official Video)" and Spotify's "- Remastered 2011" endings are tidied up first so they're found.
+
+  When nothing is found, it looks again a second after each try (*Still Looking*), using whatever the player has reported about the song by then. After a minute without lyrics it says *Not Found* and only checks every 30 seconds. If the service is busy or you're offline, it tries again every 5 seconds.
 - The **Info** tab tells you about the playing song and its artist:
   - **The song** (left): its album, release date, genre, track number and length from the iTunes catalog (Apple Music's), and, when the song has its own Wikipedia article, what it is ("1991 single by Nirvana") and the article's opening.
   - **The artist** (right): their picture, what they are ("American rock band") and the opening of their Wikipedia article. When the name alone means something else (Nirvana), it finds the band's article.
