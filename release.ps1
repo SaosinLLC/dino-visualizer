@@ -10,6 +10,7 @@ $ErrorActionPreference = 'Stop'
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "The version should look like 1.2.3" }
 $git = 'C:\Program Files\Git\cmd\git.exe'
 $gh = 'C:\Program Files\GitHub CLI\gh.exe'
+$env:Path = (Split-Path $git) + ";" + $env:Path   # gh calls git itself
 
 $src = "$PSScriptRoot\src\DinoVisualizer.cs"
 $text = [IO.File]::ReadAllText($src)
