@@ -241,6 +241,7 @@ Technical details:
 - **Widget Opacity**: how see-through the widget is, 20% to 100%. It changes live while you drag the slider.
 - **Visualizer**: the visualizer style for this window and the XP widget's screen. The XP widget's own drop-down changes it too.
 - **Lyrics + Visualizer**: shows the lyrics over the visualizer (dimmed behind them) on the Visualizer and Lyrics tabs. Turning it on from another tab switches to the Visualizer tab.
+- **Visualizer Background**: replaces the window's black background with the visualizer, running behind all the panels and buttons (in the style and colors picked under **Visualizer**). *Dim* keeps it in the background so everything reads clearly; *Bright* lets it show more. The panels turn lighter so it shows through them. It only runs while the window is open, and it slows down by itself if your computer can't keep up.
 - **Equalizer**: turns the equalizer on or off.
 - **EQ Preset**: one of the 14 equalizer presets, or *Custom* after you move a slider. Picking one switches to the Equalizer tab.
 - **Close To Tray**: on (the default), closing the window keeps the app running in the tray; off, closing the window quits.

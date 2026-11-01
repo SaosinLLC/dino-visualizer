@@ -19,7 +19,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.3.1.0")]
+[assembly: System.Reflection.AssemblyVersion("1.4.0.0")]
 [assembly: System.Reflection.AssemblyTitle("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyProduct("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyCompany("Saosin LLC")]
@@ -82,7 +82,7 @@ namespace DinoVisualizer
         public const float DefaultHue = 225f;
         public static readonly Color Bg = Color.FromArgb(6, 7, 9);
         public static readonly Color Ink = Color.FromArgb(3, 3, 5);
-        public static readonly Color Glass = Color.FromArgb(200, 2, 3, 5);
+        public static Color Glass = Color.FromArgb(200, 2, 3, 5);   // lighter with the visualizer behind (MainForm)
         public static readonly Color Rec = Color.FromArgb(255, 64, 64);
         public static Color Primary, Bright, Dim, Faint, Grid;
         public static event Action Changed;
@@ -307,11 +307,32 @@ namespace DinoVisualizer
             }
         }
 
+        // The visualizer as the backdrop (Options: Visualizer Background): a picture the main window draws every frame
+        // (smaller than the window, so it's quick) and stretches behind everything in place of the scene. Null: the
+        // scene.
+        public static Bitmap Live;
+        public static Form LiveForm;
+
         public static void Paint(Graphics g, Control c)
         {
             var form = c.FindForm();
             if (form == null) { g.Clear(Theme.Bg); return; }
             var size = form.ClientSize;
+            var live = Live;
+            if (live != null && form == LiveForm && size.Width > 0 && size.Height > 0)
+            {
+                Point at = c == form ? Point.Empty : form.PointToClient(c.PointToScreen(Point.Empty));
+                var r = Rectangle.Ceiling(g.ClipBounds);
+                float kx = live.Width / (float)size.Width, ky = live.Height / (float)size.Height;
+                var mode = g.InterpolationMode;
+                var offset = g.PixelOffsetMode;
+                g.InterpolationMode = InterpolationMode.Bilinear;
+                g.PixelOffsetMode = PixelOffsetMode.Half;
+                g.DrawImage(live, r, new RectangleF((r.X + at.X) * kx, (r.Y + at.Y) * ky, r.Width * kx, r.Height * ky), GraphicsUnit.Pixel);
+                g.InterpolationMode = mode;
+                g.PixelOffsetMode = offset;
+                return;
+            }
             lock (sync)
             {
                 if (cache == null || cache.Size != size) Request(size);
@@ -5934,8 +5955,8 @@ namespace DinoVisualizer
             Top = Color.White, Bottom = Color.FromArgb(70, 70, 70), Cap = Color.White, Mid = Color.FromArgb(200, 200, 200),
             Off = Color.FromArgb(34, 34, 34), Hot = Color.White, Glow = Color.FromArgb(235, 235, 235), Axis = Color.FromArgb(110, 110, 110)
         };
-        Bitmap multi;
-        int[] multiRow;
+        Bitmap multi, multiBack;
+        int[] multiRow, multiBackRow;
         int earthAt, multiAt;   // when the Earth and the several-colors buffer were last drawn (frames)
 
         // Lets go of what only drawing needs: the Earth (and so its maps, if no other Earth is showing) and the
@@ -5945,8 +5966,9 @@ namespace DinoVisualizer
             if (earth != null) earth.Dispose();
             earth = null;
             if (multi != null) multi.Dispose();
-            multi = null;
-            multiRow = null;
+            if (multiBack != null) multiBack.Dispose();
+            multi = multiBack = null;
+            multiRow = multiBackRow = null;
         }
 
         // Called every frame: what hasn't been drawn for five seconds (another style chosen, the window hidden) goes.
@@ -5957,15 +5979,22 @@ namespace DinoVisualizer
                 earth.Dispose();
                 earth = null;
             }
-            if (multi != null && tick - multiAt > 150)
+            if ((multi != null || multiBack != null) && tick - multiAt > 150)
             {
-                multi.Dispose();
-                multi = null;
-                multiRow = null;
+                if (multi != null) multi.Dispose();
+                if (multiBack != null) multiBack.Dispose();
+                multi = multiBack = null;
+                multiRow = multiBackRow = null;
             }
         }
 
-        public void DrawMulti(Graphics g, RectangleF r, int style, float unit, Color[] palette)
+        public void DrawMulti(Graphics g, RectangleF r, int style, float unit, Color[] palette) { DrawMulti(g, r, style, unit, palette, ref multi, ref multiRow); }
+
+        // The same for the window's background, with a buffer of its own (so the two sizes don't take turns remaking
+        // one every frame).
+        public void DrawMultiBackground(Graphics g, RectangleF r, int style, float unit, Color[] palette) { DrawMulti(g, r, style, unit, palette, ref multiBack, ref multiBackRow); }
+
+        void DrawMulti(Graphics g, RectangleF r, int style, float unit, Color[] palette, ref Bitmap multi, ref int[] multiRow)
         {
             int w = (int)Math.Ceiling(r.Width), h = (int)Math.Ceiling(r.Height);
             // Earth and Raining Blood keep their own colors.
@@ -11538,11 +11567,60 @@ namespace DinoVisualizer
         float widgetOpacity = (float)Math.Max(NowPlayingWidget.MinOpacity, Math.Min(1, Settings.Num("widgetopacity", 1)));
         int vizStyle, scanIdx, uiTicks;
         bool closeToTray, exiting, trayHintShown, minimized, startInTray;
+
+        // The visualizer behind the whole window in place of the black scene (Visualizer Background), dimmed so the
+        // words over it read clearly. It's drawn at half the window's size and stretched, and the window waits at
+        // least as long as a frame took before drawing the next, so a slow computer stays responsive.
+        static readonly string[] BackNames = { "Off", "Dim", "Bright" };
+        static readonly int[] BackDims = { 0, 145, 70 };    // how dark it's shaded (0..255)
+        static readonly int[] GlassAlphas = { 200, 130, 130 };   // the panels' dark glass, lighter so it shows through
+        int backIdx;
+        Bitmap backPic;
+        DateTime nextBack;
+
+        void StepBackground()
+        {
+            if (Backdrop.Fast || DateTime.UtcNow < nextBack) return;   // while the edge is dragged, the last one stretches
+            var size = ClientSize;
+            int w = Math.Max(1, size.Width / 2), h = Math.Max(1, size.Height / 2);
+            var clock = Stopwatch.StartNew();
+            if (backPic == null || backPic.Width != w || backPic.Height != h)
+            {
+                var old = backPic;
+                backPic = new Bitmap(w, h, PixelFormat.Format32bppPArgb);
+                Backdrop.Live = backPic;
+                Backdrop.LiveForm = this;
+                if (old != null) old.Dispose();
+            }
+            using (var g = Graphics.FromImage(backPic))
+            {
+                g.Clear(Color.FromArgb(9, 10, 12));
+                var r = new RectangleF(0, 0, w, h);
+                float unit = Math.Max(0.75f, Theme.Scale);   // half the window's design pixel, as it's drawn at half size
+                var palette = ColorMix.Palette();
+                if (palette != null) page.Engine.DrawMultiBackground(g, r, vizStyle, unit, palette);
+                else page.Engine.Draw(g, r, vizStyle, unit, VizColors.Accent());
+                using (var b = new SolidBrush(Color.FromArgb(BackDims[backIdx], 4, 5, 8))) g.FillRectangle(b, 0, 0, w, h);
+            }
+            Invalidate(true);
+            Update();
+            nextBack = DateTime.UtcNow.AddMilliseconds(clock.Elapsed.TotalMilliseconds);
+        }
+
+        // Back to the black scene (switched off, or the window put away).
+        void DropBackground()
+        {
+            Backdrop.Live = null;
+            if (backPic != null) backPic.Dispose();
+            backPic = null;
+        }
         readonly VrWrist wrist = new VrWrist();
 
         public MainForm()
         {
             scanIdx = Clamp(Settings.Num("scanlines", 1), ScanlineNames.Length);
+            backIdx = Clamp(Settings.Num("vizbackground", 0), BackNames.Length);
+            Theme.Glass = Color.FromArgb(GlassAlphas[backIdx], Theme.Glass);
             vizStyle = Clamp(Settings.Num("viz", 0), VizEngine.Names.Length);
             closeToTray = Settings.Num("tray", 1) != 0;
             UiDraw.ScanlineAlpha = ScanlineAlphas[scanIdx];
@@ -11664,6 +11742,7 @@ namespace DinoVisualizer
                 StepColors();   // also while the window is hidden: the widget shows the colors too
                 // (Also while the window floats in VR, even with it put away here.)
                 if ((Visible && WindowState != FormWindowState.Minimized) || wrist.WindowOpen) page.Animate(watcher != null ? watcher.Level : 0);
+                if (backIdx > 0 && Visible && WindowState != FormWindowState.Minimized) StepBackground();
             };
             ui.Tick += (s, e) =>
             {
@@ -11807,6 +11886,19 @@ namespace DinoVisualizer
                     Settings.Set("lyricsviz", page.LyricsWithViz ? 1 : 0);
                     if (page.LyricsWithViz && page.Tab != VisualizerPage.VizTab && page.Tab != VisualizerPage.LyricsTab) page.ShowTab(VisualizerPage.VizTab);
                     page.LyricsViewChanged();
+                }
+            });
+            options.Rows.Add(new OptionsPanel.Row
+            {
+                Label = "Visualizer Background:", Choices = BackNames, Current = () => backIdx,
+                Choose = i =>
+                {
+                    backIdx = i;
+                    Settings.Set("vizbackground", i);
+                    Theme.Glass = Color.FromArgb(GlassAlphas[i], Theme.Glass);
+                    nextBack = DateTime.MinValue;
+                    if (i == 0) DropBackground();
+                    Invalidate(true);
                 }
             });
             // The equalizer (it works through Equalizer APO; see the Equalizer tab). Picking a preset shows the tab.
@@ -12345,6 +12437,7 @@ namespace DinoVisualizer
         // pictures and its Earth), and the memory goes back to Windows. It's all made again when the window shows.
         void PutAway()
         {
+            DropBackground();
             Backdrop.Release();
             page.Release();
             Ram.Trim();
