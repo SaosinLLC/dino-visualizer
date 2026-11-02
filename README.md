@@ -66,7 +66,7 @@ The **Playlists** tab shows your Spotify playlists and your YouTube playlists (w
 
 - **Click a song** to play the playlist from that song. **Play** plays the whole playlist.
   - **Spotify** plays it in your Spotify app (on whatever device Spotify is open). If Spotify isn't open anywhere, the playlist opens in the Spotify app instead, so you just press play.
-  - **YouTube** songs open in YouTube Music or on YouTube in your browser. The **Open YouTube in** button switches between the two.
+  - **YouTube** songs open in YouTube Music or on YouTube in your browser. The **Open YouTube in** button switches between the two. If a YouTube tab is already open (in Chrome, Edge, Brave, Opera, Vivaldi or Firefox), the song plays in that tab instead of a new one, and you stay in Dino Visualizer.
 - **Refresh** reloads the playlists. Each account's button also has *Reload Playlists*, *Change Developer Key...* and *Sign Out*.
 - Spotify only shows the songs of playlists you made or collaborate on. Playlists you just follow are listed, and **Play** opens them in Spotify.
 

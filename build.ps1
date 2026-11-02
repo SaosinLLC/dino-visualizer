@@ -3,7 +3,8 @@ param([string]$Out = "$PSScriptRoot\DinoVisualizer.exe")
 $fw = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
 if (-not (Test-Path "$fw\csc.exe")) { $fw = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319' }
 
-$refs = 'System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll', 'System.Web.Extensions.dll', 'System.Security.dll'
+$refs = 'System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll', 'System.Web.Extensions.dll', 'System.Security.dll',
+    "$fw\WPF\UIAutomationClient.dll", "$fw\WPF\UIAutomationTypes.dll", "$fw\WPF\WindowsBase.dll"   # finding the open YouTube tab
 
 if (-not (Test-Path "$PSScriptRoot\icon.ico")) { & "$PSScriptRoot\make-icon.ps1" }
 

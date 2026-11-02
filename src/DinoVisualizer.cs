@@ -18,8 +18,9 @@ using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
+using UIA = System.Windows.Automation;
 
-[assembly: System.Reflection.AssemblyVersion("1.6.2.0")]
+[assembly: System.Reflection.AssemblyVersion("1.7.0.0")]
 [assembly: System.Reflection.AssemblyTitle("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyProduct("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyCompany("Saosin LLC")]
@@ -938,6 +939,11 @@ namespace DinoVisualizer
         [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
         [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hwnd, int msg, IntPtr wparam, IntPtr lparam);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int RegisterWindowMessage(string name);
+        [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
+        [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hwnd);
+        [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hwnd, int show);
+        [DllImport("user32.dll")] public static extern void keybd_event(byte key, byte scan, int flags, UIntPtr extra);
 
         public static readonly IntPtr HwndBroadcast = new IntPtr(0xffff);
         // Sent by a second copy of the app to ask the running one to show its window.
@@ -9761,14 +9767,131 @@ namespace DinoVisualizer
 
         public override void Play(Playlist p, int song)
         {
-            string host = OpenInMusic ? "https://music.youtube.com/" : "https://www.youtube.com/";
+            bool music = OpenInMusic;
+            string host = music ? "https://music.youtube.com/" : "https://www.youtube.com/";
             var songs = p.Songs;
             string url = song >= 0 && songs != null && song < songs.Count && songs[song].Id != null
                        ? host + "watch?v=" + songs[song].Id + "&list=" + p.Id
                        : host + "playlist?list=" + p.Id;
-            Open(url, null);
-            Status = "Opened in " + (OpenInMusic ? "YouTube Music" : "YouTube");
-            Notify();
+            string where = music ? "YouTube Music" : "YouTube";
+            // In the YouTube tab that's already open, if there is one; else a new tab.
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                bool reused = false;
+                try { reused = BrowserTab.Open(url, music); } catch { }
+                if (!reused) Open(url, null);
+                Status = (reused ? "Playing in your " : "Opened in ") + where + (reused ? " tab" : "");
+                Notify();
+            });
+        }
+    }
+
+    // Plays a link in a YouTube tab that's already open (in Chrome, Edge, Brave, Opera, Vivaldi or Firefox) rather
+    // than a new one: picks the tab with UI Automation, puts the link in that window's address bar and presses Enter,
+    // then gives the focus back. Returns false (so a new tab opens instead) if there's no such tab or a step fails.
+    static class BrowserTab
+    {
+        static readonly string[] Browsers = { "chrome", "msedge", "brave", "opera", "vivaldi", "firefox" };
+        static readonly Regex YouTubeTitle = new Regex(@"(^|\s-\s)YouTube( Music)?(\s-\s|$)");
+        static readonly object busy = new object();
+
+        sealed class Found
+        {
+            public UIA.AutomationElement Window, Tab, Address;
+            public int Score;
+        }
+
+        public static bool Open(string url, bool music)
+        {
+            if (!Monitor.TryEnter(busy)) return false;
+            try
+            {
+                var best = Find(music);
+                if (best == null) return false;
+                IntPtr hwnd = new IntPtr(best.Window.Current.NativeWindowHandle);
+                IntPtr before = Native.GetForegroundWindow();
+
+                object pattern;
+                if (best.Tab.TryGetCurrentPattern(UIA.SelectionItemPattern.Pattern, out pattern)) ((UIA.SelectionItemPattern)pattern).Select();
+                else if (best.Tab.TryGetCurrentPattern(UIA.InvokePattern.Pattern, out pattern)) ((UIA.InvokePattern)pattern).Invoke();
+                else return false;
+
+                bool minimized = Native.IsIconic(hwnd);
+                if (minimized) Native.ShowWindow(hwnd, 9);   // restore
+                Native.SetForegroundWindow(hwnd);
+                if (!WaitFor(() => Native.GetForegroundWindow() == hwnd)) { Back(hwnd, minimized, before); return false; }
+                best.Address.SetFocus();
+                if (!best.Address.TryGetCurrentPattern(UIA.ValuePattern.Pattern, out pattern)) { Back(hwnd, minimized, before); return false; }
+                ((UIA.ValuePattern)pattern).SetValue(url);
+                // Enter only goes to the address bar, never to whatever else might have the focus by now.
+                if (!WaitFor(() => Native.GetForegroundWindow() == hwnd && best.Address.Current.HasKeyboardFocus)) { Back(hwnd, minimized, before); return false; }
+                Native.keybd_event(0x0D, 0, 0, UIntPtr.Zero);
+                Native.keybd_event(0x0D, 0, 2, UIntPtr.Zero);
+                Thread.Sleep(150);
+                Back(hwnd, minimized, before);
+                return true;
+            }
+            finally { Monitor.Exit(busy); }
+        }
+
+        // The best YouTube tab: one playing sound first, then the kind asked for (YouTube Music or YouTube), then the
+        // one showing in its window.
+        static Found Find(bool music)
+        {
+            var ids = new HashSet<int>();
+            foreach (string name in Browsers)
+                foreach (var p in Process.GetProcessesByName(name)) { ids.Add(p.Id); p.Dispose(); }
+            if (ids.Count == 0) return null;
+            Found best = null;
+            foreach (UIA.AutomationElement window in UIA.AutomationElement.RootElement.FindAll(UIA.TreeScope.Children, UIA.Condition.TrueCondition))
+            {
+                try
+                {
+                    if (!ids.Contains(window.Current.ProcessId)) continue;
+                    var tabs = new List<UIA.AutomationElement>();
+                    UIA.AutomationElement address = null;
+                    Walk(window, 0, tabs, ref address);
+                    if (address == null) continue;
+                    foreach (var tab in tabs)
+                    {
+                        string title = tab.Current.Name ?? "";
+                        int score = 1;
+                        if (title.IndexOf("playing", StringComparison.OrdinalIgnoreCase) >= 0) score += 4;
+                        if (title.Contains("YouTube Music") == music) score += 2;
+                        object pattern;
+                        if (tab.TryGetCurrentPattern(UIA.SelectionItemPattern.Pattern, out pattern) && ((UIA.SelectionItemPattern)pattern).Current.IsSelected) score += 1;
+                        if (best == null || score > best.Score) best = new Found { Window = window, Tab = tab, Address = address, Score = score };
+                    }
+                }
+                catch { }   // a window that closed meanwhile
+            }
+            return best;
+        }
+
+        // The window's YouTube tabs and its address bar (the first box with a value), skipping the pages themselves.
+        static void Walk(UIA.AutomationElement e, int depth, List<UIA.AutomationElement> tabs, ref UIA.AutomationElement address)
+        {
+            var type = e.Current.ControlType;
+            if (type == UIA.ControlType.Document) return;
+            if (type == UIA.ControlType.TabItem && YouTubeTitle.IsMatch(e.Current.Name ?? "")) tabs.Add(e);
+            object pattern;
+            if (type == UIA.ControlType.Edit && address == null && e.TryGetCurrentPattern(UIA.ValuePattern.Pattern, out pattern)) address = e;
+            if (depth >= 14) return;
+            var walker = UIA.TreeWalker.ControlViewWalker;
+            for (var c = walker.GetFirstChild(e); c != null; c = walker.GetNextSibling(c)) Walk(c, depth + 1, tabs, ref address);
+        }
+
+        static bool WaitFor(Func<bool> done)
+        {
+            for (int i = 0; i < 25; i++) { if (done()) return true; Thread.Sleep(20); }
+            return false;
+        }
+
+        // Puts the browser back how it was (minimized) and the focus back where it was (usually Dino Visualizer).
+        static void Back(IntPtr hwnd, bool minimized, IntPtr before)
+        {
+            if (minimized) Native.ShowWindow(hwnd, 7);   // minimized, without taking the focus
+            if (before != IntPtr.Zero && before != hwnd) Native.SetForegroundWindow(before);
         }
     }
 
