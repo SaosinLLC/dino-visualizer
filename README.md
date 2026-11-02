@@ -139,7 +139,7 @@ The bands are saved in `DinoVisualizer.txt` in Equalizer APO's config folder (`C
 
 ## The widget
 
-Press `Ctrl+F11` anywhere to show or hide the widget, in the last style you picked. Every style shows the song and album art, with player buttons and a volume control that sets just that app's volume (so does the mouse wheel over the card). Drag the middle to move it, and drag any corner to resize it (60% to 250%). It remembers its position, size and style, never takes focus from what you're doing, and shows up in recordings and streams when it's inside the captured area.
+Press `Ctrl+F11` anywhere to show or hide the widget, in the last style you picked (you can change those keys on the [Keys tab](#keybinds-the-keys-tab)). Every style shows the song and album art, with player buttons and a volume control that sets just that app's volume (so does the mouse wheel over the card). Drag the middle to move it, and drag any corner to resize it (60% to 250%). It remembers its position, size and style, never takes focus from what you're doing, and shows up in recordings and streams when it's inside the captured area.
 
 - **Dino Style**: a small card in the app's own look, with a progress bar you can click or drag to seek, and a volume slider.
 - **Windows Style**: like the Windows 10 media flyout. Its volume panel stays hidden until you hover over it or the volume changes, and fades away 2 seconds later.
@@ -242,6 +242,20 @@ Technical details:
 - It works through OSC: messages go to `/chatbox/input` on this computer only (`127.0.0.1`, UDP port 9000). Nothing goes over the internet.
 - If you've moved VRChat's OSC port, add `vrcport=<port>` to `settings.ini`.
 
+## Keybinds (the Keys tab)
+
+The **Keys** tab is for your own keyboard shortcuts. They work from any app, so they work in a game, in VRChat or with a headset on.
+
+- **Add Keybind**, then press the keys you want (like `Ctrl+Alt+P`). To change a keybind's keys, click its key box and press new ones. Esc cancels, and Backspace clears the keys.
+- Click the box next to it to pick what the keys do:
+  - **The music**: Play / Pause, Next Song, Previous Song, Volume Up and Volume Down (in steps of 5%, and they keep going while held).
+  - **The windows**: Show / Hide Widget, Show / Hide Window, Next and Previous Visualizer.
+  - **Turning features on and off**: the VRChat Chatbox, the Chatbox Status (and Next Chatbox Status), the Chatbox Clock, Discord Status, VR Wrist, VR Batteries, Viz Background, Lyrics + Visualizer, the Equalizer, the Sleep Timer, Hue Cycle and Random Colors. Each one works like switching it in Options. Turning one back on brings back the choice it had before, so the VRChat Chatbox comes back as *Song + Lyrics* if that's what it was.
+- When the window isn't in front, a quick notification says what a keybind switched.
+- A letter, number or other typing key needs Ctrl or Alt with it, so it doesn't stop that key typing in every app. F-keys and media keys can be used on their own.
+- *Used by another app* means another program already has those keys (pick others); *Same keys as above* means two of your keybinds share them.
+- `Ctrl+F11` for the widget is there to start with. Delete it or change it like any other.
+
 ## Options
 
 - **Widget**: *Off*, *Dino Style*, *Windows Style*, *Aero Style*, *XP Style* or *Orb Style*.
@@ -284,7 +298,7 @@ Options are remembered between launches in `%AppData%\Dino Visualizer\settings.i
 ## Notes
 
 - Windows doesn't let apps read a player's actual frequencies, so the visualizers follow the player's loudness meter about 30 times a second, spread over a moving pattern.
-- Dino Recorder has its own copy of the widget. If both apps are running, only the first one started gets `Ctrl+F11`.
+- Dino Recorder has its own copy of the widget. If both apps are running, only the first one started gets `Ctrl+F11`; the Keys tab shows *Used by another app* and you can pick other keys there.
 
 ## VR wrist (SteamVR)
 

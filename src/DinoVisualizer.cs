@@ -19,7 +19,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.5.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.6.0.0")]
 [assembly: System.Reflection.AssemblyTitle("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyProduct("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyCompany("Saosin LLC")]
@@ -10741,7 +10741,7 @@ namespace DinoVisualizer
     {
         public readonly VizEngine Engine = new VizEngine();
         public int Style;
-        public const int VizTab = 0, EqTab = 1, LyricsTab = 2, PlaylistsTab = 3, SecretTab = 4, InfoTab = 5, StatusTab = 6, TabCount = 7;
+        public const int VizTab = 0, EqTab = 1, LyricsTab = 2, PlaylistsTab = 3, SecretTab = 4, InfoTab = 5, StatusTab = 6, KeysTab = 7, TabCount = 8;
         public int Tab;                          // what the lower box shows
         bool ShowEq { get { return Tab == EqTab; } }
         public event Action<TimeSpan> SeekRequested;
@@ -10960,7 +10960,7 @@ namespace DinoVisualizer
 
             // The lower box: the visualizer, the equalizer or the lyrics, picked with the tabs in its corner.
             var vbox = VizBox();
-            vizTab = eqTab = lyricsTab = infoTab = playlistsTab = secretTab = statusTab = Rectangle.Empty;
+            vizTab = eqTab = lyricsTab = infoTab = playlistsTab = secretTab = statusTab = keysTab = Rectangle.Empty;
             clicks.Clear();
             bool typing = false;   // the status box is on show
             if (vbox.Height > Theme.S(90))
@@ -10977,10 +10977,10 @@ namespace DinoVisualizer
                 // shortened, and then the Status tab's switch is left out (it's in the tab too).
                 int switchH = Theme.S(26), switchW = ButtonWidth(g, "Off") + Theme.S(4), room = vbox.Width - Theme.S(36);
                 Func<string[], int> tabsWidth = list => list.Sum(t => Theme.SpacedWidth(g, t, Theme.TileTitle, Theme.S(1)) + Theme.S(12));
-                var names = new[] { "Visualizer", "Equalizer", "Lyrics", "Info", "Playlists", "Secret", "Status" };
-                if (tabsWidth(names) + 2 * switchW + 6 * Theme.S(10) > room) names = new[] { "Viz", "EQ", "Lyrics", "Info", "Lists", "Secret", "Status" };
-                bool statusSwitchFits = tabsWidth(names) + 2 * switchW + 6 * Theme.S(10) <= room;
-                int gap = Math.Max(Theme.S(10), Math.Min(Theme.S(28), (room - tabsWidth(names) - (statusSwitchFits ? 2 : 1) * switchW) / 6));
+                var names = new[] { "Visualizer", "Equalizer", "Lyrics", "Info", "Playlists", "Secret", "Status", "Keys" };
+                if (tabsWidth(names) + 2 * switchW + 7 * Theme.S(10) > room) names = new[] { "Viz", "EQ", "Lyrics", "Info", "Lists", "Secret", "Status", "Keys" };
+                bool statusSwitchFits = tabsWidth(names) + 2 * switchW + 7 * Theme.S(10) <= room;
+                int gap = Math.Max(Theme.S(10), Math.Min(Theme.S(28), (room - tabsWidth(names) - (statusSwitchFits ? 2 : 1) * switchW) / 7));
                 vizTab = DrawTab(g, names[0], tabX, tabY, Tab == VizTab, hoverTab == VizTab);
                 eqTab = DrawTab(g, names[1], vizTab.Right + gap, tabY, Tab == EqTab, hoverTab == EqTab);
                 lyricsTab = DrawTab(g, names[2], eqTab.Right + gap, tabY, Tab == LyricsTab, hoverTab == LyricsTab);
@@ -11002,7 +11002,10 @@ namespace DinoVisualizer
                 var statusSwitch = !statusSwitchFits ? statusTab
                     : Button(g, statusOn ? "On" : "Off", statusTab.Right + Theme.S(4), tabY - (switchH - Theme.TileTitle.Height) / 2, switchH,
                              statusOn ? Theme.Primary : Theme.Faint, () => { VrcChatbox.StatusOn = !statusOn; Invalidate(VizBox()); });
-                string name = Tab == EqTab ? (!Equalizer.Installed ? "Not Installed" : !Equalizer.Enabled ? "Off" : PresetLabel())
+                // Your own keyboard shortcuts.
+                keysTab = DrawTab(g, names[7], statusSwitch.Right + gap, tabY, Tab == KeysTab, hoverTab == KeysTab);
+                string name = Tab == KeysTab ? KeysLabel()
+                            : Tab == EqTab ? (!Equalizer.Installed ? "Not Installed" : !Equalizer.Enabled ? "Off" : PresetLabel())
                             : Tab == LyricsTab ? LyricsLabel()
                             : Tab == PlaylistsTab ? PlaylistsLabel()
                             : Tab == SecretTab ? SecretLabel()
@@ -11010,7 +11013,7 @@ namespace DinoVisualizer
                             : Tab == StatusTab ? StatusLabel()
                             : VizEngine.Names[Math.Max(0, Math.Min(VizEngine.Names.Length - 1, Style))];
                 // On the right, in whatever room the tabs leave (shortened if it's tight).
-                int nameX = statusSwitch.Right + Theme.S(16);
+                int nameX = keysTab.Right + Theme.S(16);
                 if (vbox.Right - Theme.S(18) - nameX > Theme.S(100))
                     TextRenderer.DrawText(g, name, Theme.TileValue, new Rectangle(nameX, vbox.Y + Theme.S(8), vbox.Right - Theme.S(18) - nameX, Theme.S(40)),
                         Theme.Bright, TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
@@ -11022,6 +11025,7 @@ namespace DinoVisualizer
                     else if (Tab == SecretTab) DrawSecret(g, area);
                     else if (Tab == InfoTab) DrawInfo(g, area);
                     else if (Tab == StatusTab) typing = DrawStatus(g, area);
+                    else if (Tab == KeysTab) DrawKeys(g, area);
                     else
                     {
                         if (ShowsViz && !VizBehind)
@@ -11060,7 +11064,7 @@ namespace DinoVisualizer
 
         // ---- The equalizer's sliders: one per band, -12 to +12 dB, with the response curve drawn through the knobs.
 
-        Rectangle vizTab, eqTab, lyricsTab, infoTab, playlistsTab, secretTab, statusTab, getButton;
+        Rectangle vizTab, eqTab, lyricsTab, infoTab, playlistsTab, secretTab, statusTab, keysTab, getButton;
         readonly Rectangle[] eqColumns = new Rectangle[10];
         int hoverTab = -1, eqHover = -1, eqDrag = -1, eqTop, eqBottom;
         bool getHover;
@@ -11629,6 +11633,186 @@ namespace DinoVisualizer
 
         static int ButtonWidth(Graphics g, string text) { return Theme.SpacedWidth(g, text, Theme.TileTitle, Theme.S(1)) + Theme.S(42); }
 
+        // ---- Keys: your own keyboard shortcuts (see Keybinds). Each row is a key box (click it and press the keys)
+        // and what they do (click it for the list of everything a shortcut can do, drawn over the tab). While keys
+        // are being recorded the shortcuts are let go, so pressing one that's already set reaches this tab.
+
+        int keysRecording = -1, keysMenu = -1, keysScroll;   // the row whose keys or action are being picked
+        string keysHint;                                     // a word about the keys just pressed (null: the usual line)
+        Rectangle keysList;
+        int KeyRowHeight { get { return Theme.S(44); } }
+
+        static string KeysLabel()
+        {
+            int n = Keybinds.List.Count;
+            return n == 0 ? "No Keybinds" : n == 1 ? "1 Keybind" : n + " Keybinds";
+        }
+
+        void StartRecording(int i)
+        {
+            keysRecording = i;
+            keysMenu = -1;
+            keysHint = "Press the keys for this shortcut, like Ctrl+Alt+P. Esc cancels; Backspace clears it.";
+            Keybinds.Pause(true);
+            Focus();
+            Invalidate(VizBox());
+        }
+
+        void StopRecording()
+        {
+            if (keysRecording < 0) return;
+            keysRecording = -1;
+            Keybinds.Pause(false);
+            Invalidate(VizBox());
+        }
+
+        // Switched to another app while recording: the shortcuts come back as they were.
+        public void CancelRecording()
+        {
+            if (keysRecording < 0) return;
+            keysHint = null;
+            StopRecording();
+        }
+
+        [DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            return RecordKey(keyData) || base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        // Keys pressed while a row is recording, wherever the focus is in the window (the main window passes them on;
+        // Alt and the other system keys come through too). False when nothing's recording.
+        public bool RecordKey(Keys keyData)
+        {
+            if (keysRecording < 0) return false;
+            var code = keyData & Keys.KeyCode;
+            var mods = keyData & Keys.Modifiers;
+            if (code == Keys.ShiftKey || code == Keys.ControlKey || code == Keys.Menu || code == Keys.LWin || code == Keys.RWin) return true;   // waiting for the key itself
+            if (mods == Keys.None && code == Keys.Escape) { keysHint = null; StopRecording(); return true; }
+            if (mods == Keys.None && (code == Keys.Back || code == Keys.Delete)) { Keybinds.SetKeys(keysRecording, 0, 0); keysHint = null; StopRecording(); return true; }
+            bool win = GetAsyncKeyState(0x5B) < 0 || GetAsyncKeyState(0x5C) < 0;
+            int m = ((mods & Keys.Alt) != 0 ? Keybinds.Alt : 0) | ((mods & Keys.Control) != 0 ? Keybinds.Ctrl : 0) |
+                    ((mods & Keys.Shift) != 0 ? Keybinds.Shift : 0) | (win ? Keybinds.Win : 0);
+            if ((m & ~Keybinds.Shift) == 0 && Keybinds.Typing(code))
+            {
+                keysHint = "Add Ctrl or Alt to " + Keybinds.KeyName(code) + ": on its own it would stop that key typing in every app.";
+                Invalidate(VizBox());
+                return true;
+            }
+            Keybinds.SetKeys(keysRecording, m, (int)code);
+            keysHint = null;
+            StopRecording();
+            return true;
+        }
+
+        void DrawKeys(Graphics g, Rectangle area)
+        {
+            int h = Theme.S(32), sp = Theme.S(1);
+            int y = area.Y;
+            TextRenderer.DrawText(g, keysHint ?? "Your own shortcuts. They work from any app, even in a game or VR. Click a key box and press the keys, then pick what they do.",
+                Theme.Body, new Rectangle(area.X, y, area.Width, Theme.Body.Height + Theme.S(4)), keysHint != null ? Theme.Bright : Theme.Dim, OneLine);
+            y += Theme.Body.Height + Theme.S(14);
+            Button(g, "Add Keybind", area.X, y, h, Theme.Primary, () =>
+            {
+                Keybinds.Add();
+                keysScroll = int.MaxValue;   // down to the new one (kept in range when drawn)
+                StartRecording(Keybinds.List.Count - 1);
+            });
+            y += h + Theme.S(14);
+
+            keysList = new Rectangle(area.X, y, area.Width, Math.Max(0, area.Bottom - y));
+            var list = Keybinds.List;
+            if (list.Count == 0)
+                TextRenderer.DrawText(g, "No keybinds yet. Click Add Keybind, press the keys you want, then pick what they do.",
+                    Theme.Body, keysList, Theme.Faint, TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+            else
+            {
+                int rh = KeyRowHeight;
+                keysScroll = Math.Max(0, Math.Min(keysScroll, list.Count * rh - keysList.Height));
+                var clip = g.Clip;
+                g.SetClip(keysList, CombineMode.Intersect);
+                int keyW = Math.Min(Theme.S(250), keysList.Width / 3);
+                for (int i = 0; i < list.Count; i++)
+                {
+                    var row = new Rectangle(keysList.X, keysList.Y + i * rh - keysScroll, keysList.Width, rh - Theme.S(6));
+                    if (row.Bottom < keysList.Y || row.Y > keysList.Bottom) continue;
+                    int index = i;
+                    var b = list[i];
+
+                    // The keys: lit up while it's listening for them.
+                    var keyBox = new Rectangle(row.X, row.Y, keyW, row.Height);
+                    bool recording = i == keysRecording, hot = clicks.Count == clickHover;
+                    using (var br = new SolidBrush(recording ? Color.FromArgb(90, Theme.Primary) : hot ? Color.FromArgb(45, Theme.Primary) : Color.FromArgb(12, 13, 17)))
+                        g.FillRectangle(br, keyBox);
+                    UiDraw.Box(g, keyBox, Theme.S(2), recording || hot ? Theme.Bright : Theme.Dim);
+                    string keys = recording ? "Press the keys..." : b.Key == 0 ? "Click to set keys" : Keybinds.KeyText(b);
+                    TextRenderer.DrawText(g, keys, Theme.TileValue, Rectangle.Inflate(keyBox, -Theme.S(12), 0),
+                        recording ? Color.White : b.Key == 0 ? Theme.Faint : Theme.Bright, Clipped);
+                    clicks.Add(new KeyValuePair<Rectangle, Action>(Rectangle.Intersect(keyBox, keysList), () => StartRecording(index)));
+
+                    // What they do: a drop-down like the Options ones.
+                    int ax = keyBox.Right + Theme.S(14);
+                    var actionBox = new Rectangle(ax, row.Y + (row.Height - Theme.S(32)) / 2, Math.Max(Theme.S(120), Math.Min(Theme.S(330), row.Right - Theme.S(230) - ax)), Theme.S(32));
+                    hot = clicks.Count == clickHover;
+                    using (var br = new SolidBrush(hot || i == keysMenu ? Theme.Bright : Theme.Primary)) g.FillRectangle(br, actionBox);
+                    Theme.DrawSpaced(g, OptionsPanel.Fit(g, Keybinds.ActionNames[b.Action], Theme.OptionValue, actionBox.Width - Theme.S(44)), Theme.OptionValue, Theme.Ink,
+                        actionBox.X + Theme.S(12), actionBox.Y + (actionBox.Height - Theme.OptionValue.Height) / 2, sp, true);
+                    UiDraw.DownTriangle(g, Theme.Ink, actionBox.Right - Theme.S(20), actionBox.Y + actionBox.Height / 2, Theme.S(8));
+                    clicks.Add(new KeyValuePair<Rectangle, Action>(Rectangle.Intersect(actionBox, keysList), () => { keysMenu = index; StopRecording(); Invalidate(VizBox()); }));
+
+                    // Why it isn't working, if it isn't, and Delete.
+                    int rx = KeyLink(g, "Delete", row.Right - Theme.S(10), row, () =>
+                    {
+                        if (keysRecording == index) { keysHint = null; StopRecording(); }
+                        Keybinds.Remove(index);
+                    });
+                    string problem = Keybinds.Problem(i);
+                    if (problem != "")
+                        TextRenderer.DrawText(g, problem, Theme.Body, new Rectangle(actionBox.Right + Theme.S(14), row.Y, Math.Max(0, rx - Theme.S(14) - actionBox.Right - Theme.S(14)), row.Height),
+                            Color.FromArgb(255, 120, 100), Clipped);
+                }
+                g.Clip = clip;
+            }
+            if (keysMenu >= 0 && keysMenu < list.Count) DrawKeysMenu(g, area, keysMenu);
+            else keysMenu = -1;
+        }
+
+        // A small text button at the right of a keybind's row, ending at right; returns where it starts.
+        int KeyLink(Graphics g, string text, int right, Rectangle row, Action click)
+        {
+            int w = TextRenderer.MeasureText(g, text, Theme.Body, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
+            bool hot = clicks.Count == clickHover;
+            TextRenderer.DrawText(g, text, Theme.Body, new Rectangle(right - w, row.Y, w, row.Height), hot ? Theme.Bright : Theme.Dim, Clipped);
+            clicks.Add(new KeyValuePair<Rectangle, Action>(Rectangle.Intersect(new Rectangle(right - w - Theme.S(6), row.Y, w + Theme.S(12), row.Height), keysList), click));
+            return right - w;
+        }
+
+        // Everything a shortcut can do, in columns over the whole tab; a click outside the list closes it.
+        void DrawKeysMenu(Graphics g, Rectangle area, int index)
+        {
+            clicks.Add(new KeyValuePair<Rectangle, Action>(area, () => { keysMenu = -1; Invalidate(VizBox()); }));
+            using (var br = new SolidBrush(Color.FromArgb(6, 7, 10))) g.FillRectangle(br, area);
+            UiDraw.Box(g, area, Theme.S(2), Theme.Primary);
+            var b = Keybinds.List[index];
+            string title = "What should " + (b.Key == 0 ? "this keybind" : Keybinds.KeyText(b)) + " do?";
+            Theme.DrawSpaced(g, title, Theme.TileTitle, Theme.Bright, area.X + Theme.S(16), area.Y + Theme.S(14), Theme.S(1));
+            var names = Keybinds.ActionNames;
+            int top = area.Y + Theme.S(14) + Theme.TileTitle.Height + Theme.S(14);
+            int cols = Math.Max(1, Math.Min(3, (area.Width - Theme.S(32)) / Theme.S(250)));
+            int rows = (names.Length + cols - 1) / cols;
+            int cellW = (area.Width - Theme.S(32)) / cols, cellH = Math.Max(Theme.S(22), Math.Min(Theme.S(36), (area.Bottom - Theme.S(12) - top) / rows));
+            for (int i = 0; i < names.Length; i++)
+            {
+                var cell = new Rectangle(area.X + Theme.S(16) + i / rows * cellW, top + i % rows * cellH, cellW - Theme.S(8), cellH - Theme.S(4));
+                bool picked = i == b.Action, hot = clicks.Count == clickHover;
+                if (picked || hot) using (var br = new SolidBrush(picked ? Theme.Primary : Color.FromArgb(55, Theme.Primary))) g.FillRectangle(br, cell);
+                TextRenderer.DrawText(g, names[i], Theme.Body, Rectangle.Inflate(cell, -Theme.S(10), 0), picked ? Theme.Ink : hot ? Theme.Bright : Theme.Primary, Clipped);
+                int action = i;
+                clicks.Add(new KeyValuePair<Rectangle, Action>(cell, () => { Keybinds.SetAction(index, action); keysMenu = -1; Invalidate(VizBox()); }));
+            }
+        }
+
         // ---- The VRChat chatbox status: write a few lines, pick the one to show (or let them take turns), and see
         // what the bubble above your head says right now.
 
@@ -12007,6 +12191,13 @@ namespace DinoVisualizer
         protected override void OnMouseWheel(MouseEventArgs e)
         {
             base.OnMouseWheel(e);
+            if (Tab == KeysTab && keysMenu < 0 && keysList.Contains(e.Location))
+            {
+                keysScroll = Math.Max(0, keysScroll - e.Delta / 120 * KeyRowHeight * 2);
+                clickHover = -1;
+                Invalidate(VizBox());
+                return;
+            }
             if (Tab == StatusTab && statusList.Contains(e.Location))
             {
                 statusScroll = Math.Max(0, statusScroll - e.Delta / 120 * RowHeight * 2);
@@ -12096,12 +12287,14 @@ namespace DinoVisualizer
         {
             base.OnMouseDown(e);
             if (e.Button != MouseButtons.Left) return;
+            if (keysRecording >= 0) StopRecording();   // a click anywhere ends recording keys (on a key box, it starts that one)
             int player = PlayerButtonAt(e.Location);
             if (player >= 0)
             {
                 if (PlayerCommand != null) PlayerCommand(player == 0 ? MediaWatcher.Previous : player == 1 ? MediaWatcher.PlayPause : MediaWatcher.Next);
                 return;
             }
+            if (keysTab.Contains(e.Location)) { SetTab(KeysTab); return; }
             if (vizTab.Contains(e.Location)) { SetTab(VizTab); return; }
             if (eqTab.Contains(e.Location)) { SetTab(EqTab); return; }
             if (lyricsTab.Contains(e.Location)) { SetTab(LyricsTab); return; }
@@ -12147,7 +12340,7 @@ namespace DinoVisualizer
             bool on = seeking || ProgressHit.Contains(e.Location);
             int tab = vizTab.Contains(e.Location) ? VizTab : eqTab.Contains(e.Location) ? EqTab : lyricsTab.Contains(e.Location) ? LyricsTab
                     : playlistsTab.Contains(e.Location) ? PlaylistsTab : secretTab.Contains(e.Location) ? SecretTab : infoTab.Contains(e.Location) ? InfoTab
-                    : statusTab.Contains(e.Location) ? StatusTab : -1;
+                    : statusTab.Contains(e.Location) ? StatusTab : keysTab.Contains(e.Location) ? KeysTab : -1;
             int band = Equalizer.Enabled ? EqColumnAt(e.Location) : -1;
             int lyric = LyricLineAt(e.Location);
             int click = ClickAt(e.Location);
@@ -12198,6 +12391,129 @@ namespace DinoVisualizer
         }
     }
 
+    // ------------------------------------------------------------------ keybinds
+
+    // Your own keyboard shortcuts (the Keys tab): each is some keys and what they do, from the music to switching the
+    // app's features on and off. They're Windows hotkeys (the main window registers them), so they work from any app,
+    // in a game or in VR. Kept as "mods,key,action;..." in the settings; the first time there's just Ctrl+F11 for the
+    // widget, the shortcut the app has always had.
+    static class Keybinds
+    {
+        public struct Bind { public int Mods, Key, Action; }
+        public const int Alt = 1, Ctrl = 2, Shift = 4, Win = 8;   // as RegisterHotKey takes them
+
+        public static readonly string[] ActionNames =
+        {
+            "Play / Pause", "Next Song", "Previous Song", "Volume Up", "Volume Down",
+            "Show / Hide Widget", "Show / Hide Window", "Next Visualizer", "Previous Visualizer",
+            "VRChat Chatbox On/Off", "Chatbox Status On/Off", "Next Chatbox Status", "Chatbox Clock On/Off",
+            "Discord Status On/Off", "VR Wrist On/Off", "VR Batteries On/Off", "Viz Background On/Off",
+            "Lyrics + Visualizer On/Off", "Equalizer On/Off", "Sleep Timer On/Off", "Hue Cycle On/Off", "Random Colors On/Off"
+        };
+        public const int PlayPause = 0, NextSong = 1, PreviousSong = 2, VolumeUp = 3, VolumeDown = 4, Widget = 5, Window = 6,
+                         NextViz = 7, PreviousViz = 8, StatusOnOff = 10, NextStatus = 11;
+
+        // The Options row each on/off action flips, the same as clicking it there (null: the main window does it).
+        public static readonly string[] OptionRows =
+        {
+            null, null, null, null, null, null, null, null, null,
+            "VRChat Chatbox:", null, null, "Chatbox Clock:",
+            "Discord Status:", "VR Wrist:", "VR Batteries:", "Viz Background:",
+            "Lyrics + Visualizer:", "Equalizer:", "Sleep Timer:", "Hue Cycle:", "Random Colors:"
+        };
+
+        public static readonly List<Bind> List = Load();
+        public static string[] Problems = new string[0];   // per keybind, why it isn't working ("" when it is): set by the main window
+        public static bool Paused;                         // while keys are being recorded, so they reach the Keys tab
+        public static event Action Changed;                // the list changed, or recording started or stopped
+
+        static List<Bind> Load()
+        {
+            var list = new List<Bind>();
+            string saved = Settings.Str("keys", null);
+            if (saved == null) { list.Add(new Bind { Mods = Ctrl, Key = (int)Keys.F11, Action = Widget }); return list; }
+            foreach (var part in saved.Split(';'))
+            {
+                var n = part.Split(',');
+                int mods, key, action;
+                if (n.Length == 3 && int.TryParse(n[0], out mods) && int.TryParse(n[1], out key) && int.TryParse(n[2], out action) && action >= 0 && action < ActionNames.Length)
+                    list.Add(new Bind { Mods = mods, Key = key, Action = action });
+            }
+            return list;
+        }
+
+        static void Save()
+        {
+            Settings.Set("keys", string.Join(";", List.Select(b => b.Mods + "," + b.Key + "," + b.Action).ToArray()));
+            if (Changed != null) Changed();
+        }
+
+        public static void Add() { List.Add(new Bind { Action = PlayPause }); Save(); }
+        public static void Remove(int i) { if (i >= 0 && i < List.Count) { List.RemoveAt(i); Save(); } }
+        public static void SetKeys(int i, int mods, int key) { if (i >= 0 && i < List.Count) { var b = List[i]; b.Mods = mods; b.Key = key; List[i] = b; Save(); } }
+        public static void SetAction(int i, int action) { if (i >= 0 && i < List.Count) { var b = List[i]; b.Action = action; List[i] = b; Save(); } }
+        public static void Pause(bool paused) { if (Paused == paused) return; Paused = paused; if (Changed != null) Changed(); }
+
+        public static string Problem(int i) { return i < Problems.Length ? Problems[i] : ""; }
+
+        // The keys of the first working keybind for an action ("Ctrl+F11"), or null if none.
+        public static string KeysFor(int action)
+        {
+            for (int i = 0; i < List.Count; i++)
+                if (List[i].Action == action && List[i].Key != 0 && Problem(i) == "") return KeyText(List[i]);
+            return null;
+        }
+
+        public static string KeyText(Bind b)
+        {
+            if (b.Key == 0) return "";
+            return ((b.Mods & Ctrl) != 0 ? "Ctrl+" : "") + ((b.Mods & Alt) != 0 ? "Alt+" : "") + ((b.Mods & Shift) != 0 ? "Shift+" : "") +
+                   ((b.Mods & Win) != 0 ? "Win+" : "") + KeyName((Keys)b.Key);
+        }
+
+        [DllImport("user32.dll")] static extern uint MapVirtualKey(uint code, uint mapType);
+
+        public static string KeyName(Keys k)
+        {
+            if (k >= Keys.D0 && k <= Keys.D9) return ((char)('0' + (k - Keys.D0))).ToString();
+            if (k >= Keys.NumPad0 && k <= Keys.NumPad9) return "Num " + (k - Keys.NumPad0);
+            switch (k)
+            {
+                case Keys.MediaPlayPause: return "Media Play/Pause";
+                case Keys.MediaNextTrack: return "Media Next";
+                case Keys.MediaPreviousTrack: return "Media Previous";
+                case Keys.MediaStop: return "Media Stop";
+                case Keys.VolumeUp: return "Volume Up";
+                case Keys.VolumeDown: return "Volume Down";
+                case Keys.VolumeMute: return "Mute";
+                case Keys.Prior: return "Page Up";
+                case Keys.Next: return "Page Down";
+                case Keys.Return: return "Enter";
+                case Keys.Back: return "Backspace";
+                case Keys.Capital: return "Caps Lock";
+                case Keys.Scroll: return "Scroll Lock";
+                case Keys.Snapshot: return "Print Screen";
+                case Keys.Multiply: return "Num *";
+                case Keys.Add: return "Num +";
+                case Keys.Subtract: return "Num -";
+                case Keys.Divide: return "Num /";
+                case Keys.Decimal: return "Num .";
+            }
+            uint ch = MapVirtualKey((uint)k, 2);   // the character the key types, for the punctuation keys
+            if (ch > 32 && (ch & 0x80000000) == 0) return ((char)ch).ToString().ToUpperInvariant();
+            return k.ToString();
+        }
+
+        // A key that types something: on its own (or with only Shift) as a shortcut it would stop typing it anywhere.
+        public static bool Typing(Keys k)
+        {
+            if (k >= Keys.A && k <= Keys.Z || k >= Keys.D0 && k <= Keys.D9 || k >= Keys.NumPad0 && k <= Keys.NumPad9) return true;
+            if (k == Keys.Space || k == Keys.Return || k == Keys.Tab || k == Keys.Back) return true;
+            uint ch = MapVirtualKey((uint)k, 2);
+            return ch > 32 && (ch & 0x80000000) == 0;
+        }
+    }
+
     class MainForm : Form
     {
         static readonly string[] StyleNames = { "Off", "Dino Style", "Windows Style", "Aero Style", "XP Style", "Orb Style" };
@@ -12205,7 +12521,8 @@ namespace DinoVisualizer
         static readonly float[] PresetHues = { 225, 190, 130, 40, 0, 305, 265 };
         static readonly string[] ScanlineNames = { "Off", "Subtle", "Strong" };
         static readonly int[] ScanlineAlphas = { 0, 70, 125 };
-        const int HotWidget = 1, WmHotkey = 0x0312, ModCtrl = 2, NoRepeat = 0x4000;
+        const int WmHotkey = 0x0312, NoRepeat = 0x4000;
+        ToolStripMenuItem widgetItem;   // the tray menu's Show Widget, which shows the keys for it
 
         readonly TopBar top;
         readonly BottomBar bottom;
@@ -12424,7 +12741,7 @@ namespace DinoVisualizer
             try { tray.Icon = Icon != null ? new Icon(Icon, SystemInformation.SmallIconSize) : SystemIcons.Application; } catch { tray.Icon = SystemIcons.Application; }
             var menu = new ContextMenuStrip();
             menu.Items.Add("Open Dino Visualizer", null, (s, e) => ShowWindow());
-            var widgetItem = new ToolStripMenuItem("Show Widget", null, (s, e) => ToggleWidget()) { ShortcutKeyDisplayString = "Ctrl+F11" };
+            widgetItem = new ToolStripMenuItem("Show Widget", null, (s, e) => ToggleWidget()) { ShortcutKeyDisplayString = Keybinds.KeysFor(Keybinds.Widget) ?? "" };
             menu.Items.Add(widgetItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Exit", null, (s, e) => ExitApp());
@@ -12433,7 +12750,7 @@ namespace DinoVisualizer
             tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowWindow(); };
 
             Theme.Changed += OnThemeChanged;
-            Deactivate += (s, e) => options.CloseList();
+            Deactivate += (s, e) => { options.CloseList(); page.CancelRecording(); };
             frames.Tick += (s, e) =>
             {
                 StepColors();   // also while the window is hidden: the widget shows the colors too
@@ -12851,7 +13168,8 @@ namespace DinoVisualizer
             UpdateStrawberry();
             bool any = !string.IsNullOrEmpty(current.Title);
             top.State = !any ? "Idle" : current.Playing ? "Playing" : "Paused";
-            top.Line2 = "Widget: " + (widget == null ? "Off" : StyleNames[widget.Style + 1]) + "   (Ctrl+F11 shows or hides it)" + SleepNote()
+            string widgetKeys = Keybinds.KeysFor(Keybinds.Widget);
+            top.Line2 = "Widget: " + (widget == null ? "Off" : StyleNames[widget.Style + 1]) + (widgetKeys != null ? "   (" + widgetKeys + " shows or hides it)" : "") + SleepNote()
                       + (wrist.Place == 0 ? "" : wrist.Connected ? "   ·   VR Wrist: On" : "   ·   VR Wrist: Waiting For SteamVR")
                       + (!DiscordPresence.On ? "" : DiscordPresence.Connected ? "   ·   Discord: On" : "   ·   Discord: Waiting For Discord");
             top.Invalidate();
@@ -13086,8 +13404,8 @@ namespace DinoVisualizer
             base.OnHandleCreated(e);
             try { int on = 1; Native.DwmSetWindowAttribute(Handle, 20, ref on, 4); } catch { }   // dark title bar
             ColorTitleBar();
-            if (!Native.RegisterHotKey(Handle, HotWidget, ModCtrl | NoRepeat, (int)Keys.F11))
-                ShowMessage("Ctrl+F11 is taken by another app (Dino Recorder?); use the Widget option");
+            Keybinds.Changed += ApplyKeybinds;
+            ApplyKeybinds();
             if (watcher == null)
                 watcher = new MediaWatcher(info =>
                 {
@@ -13098,14 +13416,139 @@ namespace DinoVisualizer
 
         protected override void OnHandleDestroyed(EventArgs e)
         {
-            Native.UnregisterHotKey(Handle, HotWidget);
+            Keybinds.Changed -= ApplyKeybinds;
+            for (int i = 0; i < hotkeys; i++) Native.UnregisterHotKey(Handle, HotFirst + i);
+            hotkeys = 0;
             base.OnHandleDestroyed(e);
         }
 
-        // Ctrl+F11 works from any app; a second copy of the app being started asks this one to show its window.
+        // ---- The keybinds (Keys tab), as Windows hotkeys numbered from HotFirst in the list's order: registered
+        // again whenever the list changes, and let go while keys are being recorded (so they reach the Keys tab).
+        const int HotFirst = 100;
+        int hotkeys;                 // how many ids are registered (or tried)
+        float keyVolume = -1;        // the volume the last Volume Up/Down asked for, until the player reports it
+        DateTime keyVolumeAt;
+
+        void ApplyKeybinds()
+        {
+            if (!IsHandleCreated) return;
+            for (int i = 0; i < hotkeys; i++) Native.UnregisterHotKey(Handle, HotFirst + i);
+            var list = Keybinds.List;
+            hotkeys = Keybinds.Paused ? 0 : list.Count;
+            var problems = new string[list.Count];
+            for (int i = 0; i < list.Count; i++)
+            {
+                var b = list[i];
+                problems[i] = "";
+                if (b.Key == 0 || Keybinds.Paused) continue;
+                if (list.FindIndex(o => o.Key == b.Key && o.Mods == b.Mods) < i) { problems[i] = "Same keys as above"; continue; }
+                bool repeats = b.Action == Keybinds.VolumeUp || b.Action == Keybinds.VolumeDown;   // held down, the volume keeps going
+                if (!Native.RegisterHotKey(Handle, HotFirst + i, b.Mods | (repeats ? 0 : NoRepeat), b.Key)) problems[i] = "Used by another app";
+            }
+            if (!Keybinds.Paused) Keybinds.Problems = problems;
+            string widgetKeys = Keybinds.KeysFor(Keybinds.Widget);
+            if (widgetItem != null) widgetItem.ShortcutKeyDisplayString = widgetKeys ?? "";
+            UpdateStatus();
+            page.Invalidate();
+        }
+
+        void RunKeybind(int action)
+        {
+            switch (action)
+            {
+                case Keybinds.PlayPause: if (watcher != null) watcher.Send(MediaWatcher.PlayPause); return;
+                case Keybinds.NextSong: if (watcher != null) watcher.Send(MediaWatcher.Next); return;
+                case Keybinds.PreviousSong: if (watcher != null) watcher.Send(MediaWatcher.Previous); return;
+                case Keybinds.VolumeUp:
+                case Keybinds.VolumeDown:
+                {
+                    // In steps of 5%, from the one just asked for while the player hasn't caught up yet.
+                    float from = DateTime.UtcNow - keyVolumeAt < TimeSpan.FromSeconds(1.5) && keyVolume >= 0 ? keyVolume : current.Volume;
+                    if (watcher == null || from < 0) return;
+                    keyVolume = Math.Max(0, Math.Min(1, (float)Math.Round(from * 20 + (action == Keybinds.VolumeUp ? 1 : -1)) / 20f));
+                    keyVolumeAt = DateTime.UtcNow;
+                    watcher.SetVolume(keyVolume);
+                    return;
+                }
+                case Keybinds.Widget: ToggleWidget(); return;
+                case Keybinds.Window:
+                    if (Visible && WindowState != FormWindowState.Minimized) { options.CloseList(); Hide(); PutAway(); }
+                    else ShowWindow();
+                    return;
+                case Keybinds.NextViz:
+                case Keybinds.PreviousViz:
+                {
+                    int n = VizEngine.Names.Length;
+                    SetViz((vizStyle + (action == Keybinds.NextViz ? 1 : n - 1)) % n);
+                    KeyNote("Visualizer: " + VizEngine.Names[vizStyle]);
+                    return;
+                }
+                case Keybinds.StatusOnOff:
+                    VrcChatbox.StatusOn = !VrcChatbox.StatusOn;
+                    VrcChatbox.Tick(current);
+                    page.Invalidate();
+                    KeyNote("Chatbox Status: " + (VrcChatbox.StatusOn ? "On" : "Off"));
+                    return;
+                case Keybinds.NextStatus:
+                {
+                    int n = VrcChatbox.Statuses.Count;
+                    if (n == 0) return;
+                    VrcChatbox.StatusIndex = (VrcChatbox.StatusIndex + 1) % n;
+                    VrcChatbox.Tick(current);
+                    page.Invalidate();
+                    KeyNote("Chatbox Status: " + VrcChatbox.Statuses[VrcChatbox.StatusIndex]);
+                    return;
+                }
+            }
+            // An on/off for an Options row, done as clicking it there: off, or back on to what it was before.
+            string label = action >= 0 && action < Keybinds.OptionRows.Length ? Keybinds.OptionRows[action] : null;
+            var row = label == null ? null : options.Rows.FirstOrDefault(r => r.Label == label);
+            if (row == null) return;
+            string name = label.TrimEnd(':');
+            if (row.Checked != null && row.Toggle != null)
+            {
+                row.Toggle();
+                KeyNote(name + ": " + (row.Checked() ? "On" : "Off"));
+            }
+            else if (row.Choose != null && row.Current != null && row.Choices != null)
+            {
+                string key = "keylast." + Regex.Replace(name, "[^A-Za-z]", "").ToLowerInvariant();
+                int now = row.Current();
+                if (now > 0) { Settings.Set(key, now); row.Choose(0); }
+                else
+                {
+                    int last = (int)Settings.Num(key, 1);
+                    row.Choose(last > 0 && last < row.Choices.Length ? last : 1);
+                }
+                KeyNote(name + ": " + row.Choices[Math.Max(0, Math.Min(row.Choices.Length - 1, row.Current()))]);
+            }
+            options.Invalidate();
+            UpdateStatus();
+        }
+
+        // What a keybind just switched, as a quick notification when the window isn't the one in front (otherwise
+        // the change shows in it).
+        void KeyNote(string text)
+        {
+            if (Visible && WindowState != FormWindowState.Minimized && ContainsFocus) return;
+            try { tray.ShowBalloonTip(1500, "Dino Visualizer", text, ToolTipIcon.None); } catch { }
+        }
+
+        // Keys being recorded on the Keys tab reach it wherever the focus is in the window.
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            return page.RecordKey(keyData) || base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        // The keybinds work from any app; a second copy of the app being started asks this one to show its window.
         protected override void WndProc(ref Message m)
         {
-            if (m.Msg == WmHotkey && m.WParam.ToInt32() == HotWidget) { ToggleWidget(); return; }
+            if (m.Msg == WmHotkey)
+            {
+                int i = m.WParam.ToInt32() - HotFirst;
+                if (i >= 0 && i < Keybinds.List.Count) RunKeybind(Keybinds.List[i].Action);
+                return;
+            }
             if (m.Msg == Native.ShowMessage && Native.ShowMessage != 0) { ShowWindow(); return; }
             base.WndProc(ref m);
         }
