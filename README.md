@@ -217,6 +217,15 @@ How it behaves:
 - The bubble fades after a while, so the text is sent again every 10 seconds.
 - Your own typed chatbox messages get replaced while a song plays.
 
+### Discord status
+
+With **Discord Status** on in Options, your Discord profile shows what's playing: *Playing Dino Visualizer*, with the song, the artist, the album, how far in it is, and a **Get Dino Visualizer** button.
+
+- It goes through the Discord app on your computer (its Rich Presence), so Discord has to be running. Nothing is sent over the internet by Dino Visualizer itself, and no Discord account details are needed.
+- It clears while nothing is playing or the song is paused, and when you quit.
+- The status line at the top says *Discord: On* when it's connected, or *Waiting For Discord* while Discord isn't running.
+- Discord only shows it if **Share my activity** is on, under *Activity Privacy* in Discord's settings.
+
 ### Status
 
 The **Status** tab is for lines of your own, like `chilling in the club`. The one you pick shows in the bubble above the song, or on its own when nothing is playing. The status works even with VRChat Chatbox set to *Off*.
@@ -262,6 +271,7 @@ Technical details:
 - **Chatbox Adlibs**: how background vocals and adlibs look in the chatbox's lyrics: *Tiny*, *Small Caps*, *Normal* or *Hidden*.
 - **Chatbox Bar**: how the chatbox's progress bar looks. There are 15 styles, from *Line* to *Hash*; each choice in the list shows a sample.
 - **Chatbox Clock**: your computer's time at the top of the chatbox: *Off*, *12-Hour* or *24-Hour*.
+- **Discord Status**: shows what you're playing as your Discord status (see [Discord status](#discord-status)).
 - **Scanlines**, **Color Preset**, **Accent Hue**, **Accent Saturation**: the same look controls as Dino Monitor.
 - **Hue Cycle**: *Off*, *Slow*, *Medium* or *Fast*. The accent color keeps turning round the color wheel: a full turn takes 2 minutes, 40 seconds or 12 seconds. Everything that follows the accent color turns with it, including the window, the visualizer and the widget's tinted styles.
 - **Random Colors**: *Off*, *On Beats*, *Every 5 s* or *Every 15 s*. The accent color glides to a new random color on the music's beats (at most twice a second, and at least every 3 seconds while music plays, in case a song has no clear beats) or on a timer, and with more than one color the palette is reshuffled to random spots on the color wheel. It works together with Hue Cycle.
@@ -294,8 +304,14 @@ To set it up, pick a wrist in **VR Wrist** in Options: *Left Wrist (Inside)*, *L
 - The XP and Orb looks' visualizers move with the music, as on the desktop.
 
 How to use it:
-- **Show it**: turn the chosen side of your wrist toward your face. It fades in within about 40 degrees of facing you, and fades out once you turn it well away.
+- **Show it**: hold the trigger on that hand and turn the chosen side of your wrist toward your face. It fades in within about 40 degrees of facing you, and fades out once you turn it well away. Once it's up you can let go of the trigger: it stays while you look at it, so your other hand is free to point at it.
+  - **VR Wrist Shows** in Options picks *Trigger + Look* (the default) or *On A Look* (no trigger: it comes up whenever you look at your wrist).
+  - The trigger is a SteamVR Input action, *Show the wrist card*, bound to the trigger on Index, Touch, Vive, Cosmos and Windows Mixed Reality controllers. It's listed under Dino Visualizer in SteamVR's controller bindings, where it can be moved to another button. On controllers it has no binding for, the card comes up on a look alone.
 - **Press a button**: point your other controller at the card. SteamVR's laser beam comes out of it, the button under the beam lights up, and pulling the trigger presses it (Previous, Play/Pause, Next).
+- **The card's other controls** work with the laser too, on every look that has them:
+  - **Volume**: hold the trigger on the volume slider and move the laser along it; let go to leave it there.
+  - **Seek**: hold the trigger on the progress bar, move to the spot, and let go to jump the song there.
+  - **Visualizer** (XP and Orb looks): each trigger press on the visualizer box moves on to the next visualizer, for the whole app.
   - While the card is showing, your controllers point at it instead of the game; that ends when you turn your wrist away.
 - **The buttons under the card** work the same way:
 

@@ -19,7 +19,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.4.1.0")]
+[assembly: System.Reflection.AssemblyVersion("1.5.0.0")]
 [assembly: System.Reflection.AssemblyTitle("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyProduct("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyCompany("Saosin LLC")]
@@ -4270,6 +4270,75 @@ namespace DinoVisualizer
 
         public void Press(int b) { PressButton(b); }
 
+        // ---- The VR laser (the wrist card gets no mouse): the volume slider, the seek bar, the player buttons and
+        // the visualizer picker, by where the laser points on the card. The picker's menu can't open in VR, so a
+        // press on it moves on to the next visualizer. A slider held with the trigger follows the laser until it's
+        // let go, wherever the laser goes meanwhile.
+
+        public bool PointerBusy { get { return draggingVolume || seeking; } }
+
+        // The trigger pressed at p: true if a control took it (otherwise the wrist resizes the card).
+        public bool PointerDown(Point p)
+        {
+            if (!win && VolumeHit.Contains(p))
+            {
+                draggingVolume = true;
+                KeepVolume();
+                SlideVolume(p.X);
+                Invalidate();
+                return true;
+            }
+            int b = PlayerButtonAt(p);
+            if (b >= 0) { PressButton(b); return true; }
+            if (!win && ProgressHit.Contains(p))
+            {
+                seeking = true;
+                seekPreview = PositionAt(p.X);
+                Invalidate();
+                return true;
+            }
+            if ((xp || orb) && vizBox.Contains(p))
+            {
+                Visualizer = (Visualizer + 1) % VisualizerNames.Length;
+                if (VisualizerChanged != null) VisualizerChanged(Visualizer);
+                Invalidate();
+                return true;
+            }
+            return false;
+        }
+
+        public void PointerMove(Point p)
+        {
+            if (draggingVolume) { KeepVolume(); SlideVolume(p.X); return; }
+            if (seeking) { seekPreview = PositionAt(p.X); Invalidate(); return; }
+            hoverButton = PlayerButtonAt(p);
+            volumeHover = !win && VolumeHit.Contains(p);
+            progressHover = !win && ProgressHit.Contains(p);
+            vizHover = (xp || orb) && vizBox.Contains(p);
+        }
+
+        // The trigger let go: a held slider takes its place (the seek bar jumps the song there).
+        public void PointerUp(Point p)
+        {
+            if (draggingVolume) { draggingVolume = false; KeepVolume(); Invalidate(); }
+            if (!seeking) return;
+            seeking = false;
+            seekTarget = PositionAt(p.X);
+            seekAt = DateTime.UtcNow;
+            seekHoldUntil = seekAt.AddSeconds(3);
+            if (SeekRequested != null) SeekRequested(seekTarget);
+            Invalidate();
+        }
+
+        // The laser went off the card: nothing's lit, and a held slider stays where it was (no jump).
+        public void PointerLeave()
+        {
+            draggingVolume = seeking = false;
+            hoverButton = -1;
+            volumeHover = progressHover = vizHover = false;
+            Invalidate();
+        }
+
         // Corners resize, the bars and buttons do their job, and only the middle (art, title, artist) moves the card
         // (it has no title bar and never takes focus).
         protected override void OnMouseDown(MouseEventArgs e)
@@ -4535,6 +4604,49 @@ namespace DinoVisualizer
         [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int MouseScaleFn(ulong handle, ref Vector2 scale);
         [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int FromFileFn(ulong handle, IntPtr path);
         [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int TextureFn(ulong handle, ref Texture texture);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int PathFn(IntPtr path);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int NamedHandleFn(IntPtr name, ref ulong handle);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int UpdateActionsFn([In, Out] ActiveActionSet[] sets, uint size, uint count);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int DigitalFn(ulong action, ref DigitalAction data, uint size, ulong restrictToDevice);
+
+        // VRActiveActionSet_t and InputDigitalActionData_t (SteamVR Input).
+        [StructLayout(LayoutKind.Sequential)]
+        public struct ActiveActionSet { public ulong Set, RestrictedToDevice, Secondary; public uint Padding; public int Priority; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct DigitalAction
+        {
+            [MarshalAs(UnmanagedType.I1)] public bool Active;
+            public ulong Origin;
+            [MarshalAs(UnmanagedType.I1)] public bool State;
+            [MarshalAs(UnmanagedType.I1)] public bool Changed;
+            public float UpdateTime;
+        }
+
+        // SteamVR Input (IVRInput_011): the app's own actions, read alongside the game's. Null if SteamVR has no such
+        // interface (what uses it then does without).
+        public static PathFn SetActionManifest;
+        public static NamedHandleFn ActionSetHandle, ActionHandle, SourceHandle;
+        public static UpdateActionsFn UpdateActions;
+        public static DigitalFn Digital;
+
+        // A UTF-8 copy of a string for SteamVR (free it with Marshal.FreeHGlobal).
+        public static IntPtr Utf8(string s)
+        {
+            var bytes = System.Text.Encoding.UTF8.GetBytes(s + "\0");
+            IntPtr p = Marshal.AllocHGlobal(bytes.Length);
+            Marshal.Copy(bytes, 0, p, bytes.Length);
+            return p;
+        }
+
+        // A handle by name (an action set, an action or an input source); 0 if SteamVR doesn't know it.
+        public static ulong Handle(NamedHandleFn fn, string name)
+        {
+            IntPtr p = Utf8(name);
+            try { ulong h = 0; return fn(p, ref h) == 0 ? h : 0; }
+            finally { Marshal.FreeHGlobal(p); }
+        }
+
         // Texture_t: a Direct3D 11 texture (type 0) in gamma color space (1), as GDI draws.
         [StructLayout(LayoutKind.Sequential)]
         public struct Texture { public IntPtr Handle; public int Type, ColorSpace; }
@@ -4657,6 +4769,18 @@ namespace DinoVisualizer
                 SetMouseScale = Fn<MouseScaleFn>(overlay, 52);
                 SetFromFile = Fn<FromFileFn>(overlay, 63);
                 SetTexture = Fn<TextureFn>(overlay, 60);
+                int inputError = 0;
+                IntPtr input = GetGenericInterface("FnTable:IVRInput_011", ref inputError);
+                if (inputError == 0 && input != IntPtr.Zero)
+                {
+                    SetActionManifest = Fn<PathFn>(input, 0);
+                    ActionSetHandle = Fn<NamedHandleFn>(input, 1);
+                    ActionHandle = Fn<NamedHandleFn>(input, 2);
+                    SourceHandle = Fn<NamedHandleFn>(input, 3);
+                    UpdateActions = Fn<UpdateActionsFn>(input, 4);
+                    Digital = Fn<DigitalFn>(input, 5);
+                }
+                else SetActionManifest = null;
                 Running = true;
                 return true;
             }
@@ -4813,6 +4937,9 @@ namespace DinoVisualizer
         public static readonly string[] Names = { "Off", "Left Wrist (Inside)", "Left Wrist (Outside)", "Right Wrist (Inside)", "Right Wrist (Outside)" };
         public static readonly string[] Looks = { "Dino Style", "Windows Style", "Aero Style", "XP Style", "Orb Style" };
         public event Action<int> Command;   // a MediaWatcher command for the player
+        public event Action<float> VolumeChanged;       // the card's volume slider moved (the player app's, 0..1)
+        public event Action<TimeSpan> SeekRequested;    // the card's seek bar was let go
+        public event Action<int> VisualizerChanged;     // the card's visualizer picker was pressed
         public event Action Changed;        // connected to SteamVR or not
         public Func<float> LevelSource;
         public Form App;                    // the main window, shown floating in VR on the double turn
@@ -4934,6 +5061,7 @@ namespace DinoVisualizer
             try { error = OpenVr.CreateOverlay(key, name, ref overlay); }
             finally { Marshal.FreeHGlobal(key); Marshal.FreeHGlobal(name); }
             if (error != 0) { overlay = 0; OpenVr.Stop(); return; }
+            SetUpInput();
             OpenVr.SetWidth(overlay, Width);
             OpenVr.SetSortOrder(overlay, 10);
             OpenVr.SetAlpha(overlay, 0);
@@ -4943,6 +5071,9 @@ namespace DinoVisualizer
             attached = OpenVr.NoDevice;
             card = new NowPlayingWidget(1.2f, look) { LevelSource = LevelSource, Visualizer = visualizer };
             card.Command += slot => { if (Command != null) Command(slot); };
+            card.VolumeChanged += level => { if (VolumeChanged != null) VolumeChanged(level); };
+            card.SeekRequested += position => { if (SeekRequested != null) SeekRequested(position); };
+            card.VisualizerChanged += style => { if (VisualizerChanged != null) VisualizerChanged(style); };
             card.SetInfo(info);
             // The app's window, for the double turn (hidden until then).
             key = Marshal.StringToHGlobalAnsi("saosinllc.dinovisualizer.window");
@@ -4995,6 +5126,83 @@ namespace DinoVisualizer
             timer.Dispose();
         }
 
+        // ---- Trigger + Look (Options: VR Wrist Shows): the card only comes up while the trigger on the hand it's on is
+        // held. The trigger comes from SteamVR Input: the app has one action, "show", bound by default to the trigger
+        // on both hands, alongside the game's own use of it (it can be rebound under Dino Visualizer in SteamVR's
+        // controller settings). Without SteamVR Input, or with no binding for the controllers in use, the card comes
+        // up on a look alone, as it can't be held back for good.
+
+        public static readonly string[] ShowNames = { "On A Look", "Trigger + Look" };
+        public bool NeedTrigger = true;
+        bool inputReady;
+        ulong actionSet, showAction, leftSource, rightSource;
+        int inputFrame = -1, frameCount;   // the frame the action state was last updated on
+
+        const string Actions = @"{
+  ""default_bindings"": [
+    { ""controller_type"": ""knuckles"", ""binding_url"": ""bindings_knuckles.json"" },
+    { ""controller_type"": ""oculus_touch"", ""binding_url"": ""bindings_oculus_touch.json"" },
+    { ""controller_type"": ""vive_controller"", ""binding_url"": ""bindings_vive_controller.json"" },
+    { ""controller_type"": ""vive_cosmos_controller"", ""binding_url"": ""bindings_vive_cosmos_controller.json"" },
+    { ""controller_type"": ""holographic_controller"", ""binding_url"": ""bindings_holographic_controller.json"" }
+  ],
+  ""actions"": [ { ""name"": ""/actions/dino/in/show"", ""type"": ""boolean"" } ],
+  ""action_sets"": [ { ""name"": ""/actions/dino"", ""usage"": ""leftright"" } ],
+  ""localization"": [ { ""language_tag"": ""en_US"", ""/actions/dino"": ""Dino Visualizer"", ""/actions/dino/in/show"": ""Show the wrist card (held while looking)"" } ]
+}";
+
+        // A binding file: the trigger's click on both hands.
+        public static string Binding(string controller)
+        {
+            const string source = @"{ ""path"": ""/user/hand/HAND/input/trigger"", ""mode"": ""trigger"", ""inputs"": { ""click"": { ""output"": ""/actions/dino/in/show"" } } }";
+            return @"{ ""action_manifest_version"": 0, ""controller_type"": """ + controller + @""", ""name"": ""Dino Visualizer"", ""description"": ""Hold the trigger and look at the wrist to show the card"",
+  ""bindings"": { ""/actions/dino"": { ""sources"": [ " + source.Replace("HAND", "left") + ", " + source.Replace("HAND", "right") + " ] } } }";
+        }
+
+        static readonly string[] Controllers = { "knuckles", "oculus_touch", "vive_controller", "vive_cosmos_controller", "holographic_controller" };
+
+        void SetUpInput()
+        {
+            inputReady = false;
+            if (OpenVr.SetActionManifest == null) return;
+            try
+            {
+                string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Dino Visualizer", "vr");
+                Directory.CreateDirectory(folder);
+                File.WriteAllText(Path.Combine(folder, "actions.json"), Actions);
+                foreach (var c in Controllers) File.WriteAllText(Path.Combine(folder, "bindings_" + c + ".json"), Binding(c));
+                IntPtr path = OpenVr.Utf8(Path.Combine(folder, "actions.json"));
+                try { if (OpenVr.SetActionManifest(path) != 0) return; }
+                finally { Marshal.FreeHGlobal(path); }
+                actionSet = OpenVr.Handle(OpenVr.ActionSetHandle, "/actions/dino");
+                showAction = OpenVr.Handle(OpenVr.ActionHandle, "/actions/dino/in/show");
+                leftSource = OpenVr.Handle(OpenVr.SourceHandle, "/user/hand/left");
+                rightSource = OpenVr.Handle(OpenVr.SourceHandle, "/user/hand/right");
+                inputReady = actionSet != 0 && showAction != 0 && leftSource != 0 && rightSource != 0;
+            }
+            catch { inputReady = false; }
+        }
+
+        // Whether that hand's trigger is held; also true when it can't be told (no SteamVR Input, or the action has no
+        // binding for that controller), so the card still comes up.
+        bool TriggerHeld(ulong hand)
+        {
+            if (!inputReady) return true;
+            try
+            {
+                if (inputFrame != frameCount)
+                {
+                    var sets = new[] { new OpenVr.ActiveActionSet { Set = actionSet } };
+                    OpenVr.UpdateActions(sets, (uint)Marshal.SizeOf(typeof(OpenVr.ActiveActionSet)), 1);
+                    inputFrame = frameCount;
+                }
+                var d = new OpenVr.DigitalAction();
+                if (OpenVr.Digital(showAction, ref d, (uint)Marshal.SizeOf(typeof(OpenVr.DigitalAction)), hand) != 0 || !d.Active) return true;
+                return d.State;
+            }
+            catch { return true; }
+        }
+
         // ---- Where it sits. In the controller's space +X is right, +Y up and -Z where it points. The card is 19 cm
         // behind the controller's middle and 5 cm out from it, up the forearm past the controller's base and strap
         // (SteamVR draws the controllers in front of overlays, and closer in an Index controller covered it). It faces
@@ -5041,6 +5249,7 @@ namespace DinoVisualizer
 
         void Step()
         {
+            frameCount++;
             OpenVr.GetPoses(OpenVr.Standing, 0.02f, poses, OpenVr.MaxDevices);
             Pointing();
             if (windowOpen && DateTime.UtcNow >= nextWindowFrame)
@@ -5067,10 +5276,12 @@ namespace DinoVisualizer
             }
             lastWorld = world;
             float distance, toward = FacingHead(world, poses[OpenVr.Hmd].DeviceToAbsolute, out distance);
-            // Turned toward the face: within about 40 degrees to show, and it stays until past about 55 (and while it's
-            // being moved or resized). Turned toward it twice within 1.2 seconds opens or closes the app's window.
+            // Turned toward the face: within about 40 degrees to show (with Trigger + Look, only while that hand's
+            // trigger is held), and it stays until past about 55 (and while it's being moved or resized), trigger or
+            // not. Turned toward it twice within 1.2 seconds opens or closes the app's window.
             bool was = facing;
-            facing = moving || resizing || (facing ? toward > 0.57f && distance < 1.0f : toward > 0.77f && distance < 0.85f);
+            bool mayShow = !NeedTrigger || TriggerHeld(place <= 2 ? leftSource : rightSource);
+            facing = moving || resizing || (facing ? toward > 0.57f && distance < 1.0f : mayShow && toward > 0.77f && distance < 0.85f);
             if (facing && !was)
             {
                 if ((DateTime.UtcNow - lastRaise).TotalSeconds < 1.2) { ToggleWindow(); lastRaise = DateTime.MinValue; }
@@ -5092,10 +5303,14 @@ namespace DinoVisualizer
             uint size = (uint)Marshal.SizeOf(typeof(OpenVr.Event));
             while (OpenVr.PollOverlayEvent(overlay, ref e, size))
             {
-                if (e.Type == OpenVr.FocusLeave) { card.HoverButton = stripHover = -1; EndResize(); EndMove(); continue; }
-                if (e.Type == OpenVr.MouseUp) { EndResize(); EndMove(); continue; }
-                if (e.Type != OpenVr.MouseMove && e.Type != OpenVr.MouseDown) continue;
+                if (e.Type == OpenVr.FocusLeave) { card.PointerLeave(); stripHover = -1; EndResize(); EndMove(); continue; }
+                if (e.Type != OpenVr.MouseMove && e.Type != OpenVr.MouseDown && e.Type != OpenVr.MouseUp) continue;
                 float x = OpenVr.First(e), y = texHeight - OpenVr.Second(e);
+                var area = card.CardArea;
+                var p = new Point(area.X + (int)(x / texScale), area.Y + (int)(y / texScale));   // in the card's pixels
+                if (e.Type == OpenVr.MouseUp) { card.PointerUp(p); EndResize(); EndMove(); continue; }
+                // A slider held on the card follows the laser anywhere until the trigger's let go.
+                if (card.PointerBusy) { if (e.Type == OpenVr.MouseMove) card.PointerMove(p); continue; }
                 bool click = e.Type == OpenVr.MouseDown && OpenVr.Button(e) == OpenVr.LeftButton && alpha > 0.5f;
                 if (y >= cardTexHeight)
                 {
@@ -5110,12 +5325,8 @@ namespace DinoVisualizer
                     continue;
                 }
                 stripHover = -1;
-                var area = card.CardArea;
-                var p = new Point(area.X + (int)(x / texScale), area.Y + (int)(y / texScale));
-                int button = card.PlayerButtonAt(p);
-                if (e.Type == OpenVr.MouseMove) card.HoverButton = button;
-                else if (click && button >= 0) card.Press(button);
-                else if (click) StartResize();   // the trigger held on the card itself: resizing
+                if (e.Type == OpenVr.MouseMove) card.PointerMove(p);
+                else if (click && !card.PointerDown(p)) StartResize();   // the trigger held on the card itself: resizing
             }
             if (window == 0) return;
             while (OpenVr.PollOverlayEvent(window, ref e, size))
@@ -8350,6 +8561,264 @@ namespace DinoVisualizer
     // sent again now and then because the bubble fades after a while. Paused or stopped clears the bubble (or leaves
     // just the status). With lyrics the current line of the song's synced lyrics (from LRCLIB, like the Lyrics tab)
     // goes under the song.
+    // ------------------------------------------------------------------ Discord status
+
+    // What's playing as your Discord status: "Playing Dino Visualizer", with the song, the artist and how far in, through
+    // Discord's Rich Presence. That's the Discord app on this computer, reached over its local pipe (discord-ipc-0 to
+    // 9): nothing goes over the internet from here and no account or token is involved. Discord knows the app by its
+    // application ID (made at discord.com/developers), which gives the status its name and icon.
+    //
+    // It's talked to on a thread of its own, so a Discord that's slow or not running never holds up the window, and
+    // it's told of a new song or a pause straight away but at most once every 4 seconds (Discord takes 5 updates in
+    // 20). Like Spotify's own status, it clears while nothing plays.
+    static class DiscordPresence
+    {
+        public static readonly string AppId = "1566825251495485704";   // the Dino Visualizer application (a public number)
+        const string Page = "https://github.com/SaosinLLC/dino-visualizer";
+        public static readonly string[] Names = { "Off", "On" };
+        public static event Action Changed;   // connected or not (raised on its own thread)
+
+        // sync guards what's wanted (the window's thread sets it, so it's only ever held for a moment); io guards the
+        // pipe, and is held while writing to it. The pipe is opened for overlapped I/O: on a plain one, a read
+        // waiting for Discord's next message holds up any write until something arrives.
+        static readonly object sync = new object(), io = new object();
+        static readonly AutoResetEvent poke = new AutoResetEvent(false);
+        static System.Web.Script.Serialization.JavaScriptSerializer Json() { return new System.Web.Script.Serialization.JavaScriptSerializer(); }   // one each time: two threads use them
+        static Thread worker;
+        static volatile bool on, connected;
+        static Dictionary<string, object> wanted;   // the activity to show (null: none)
+        static bool dirty;                          // wanted hasn't been sent yet
+        static string shownKey = "";                // the song and state wanted, to notice changes
+        static long shownStart;                     // and when it started (ms since 1970), to notice a seek
+        static bool noDisplayType;                  // Discord turned down status_display_type (an older Discord)
+        static System.IO.Pipes.NamedPipeClientStream pipe;
+
+        public static bool Connected { get { return connected; } }
+
+        public static bool On
+        {
+            get { return on; }
+            set
+            {
+                on = value;
+                lock (sync) { dirty = true; shownKey = ""; }
+                if (on && worker == null)
+                {
+                    worker = new Thread(Run) { IsBackground = true, Name = "Discord status" };
+                    worker.Start();
+                }
+                poke.Set();
+            }
+        }
+
+        // Twice a second with what's playing (on the window's thread): only a change is passed on.
+        public static void Update(NowPlayingInfo info)
+        {
+            if (!on) return;
+            bool playing = info.Playing && !string.IsNullOrEmpty(info.Title);
+            string key = playing ? info.App + "|" + info.Artist + "|" + info.Title : "";
+            long now = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+            long start = playing ? now - (long)info.Now.TotalMilliseconds : 0;
+            lock (sync)
+            {
+                if (key == shownKey && Math.Abs(start - shownStart) < 3000) return;   // the same, give or take the clock
+                shownKey = key;
+                shownStart = start;
+                wanted = playing ? Activity(info, start) : null;
+                dirty = true;
+            }
+            poke.Set();
+        }
+
+        // Clears the status and lets go of Discord (the app is closing).
+        public static void Stop()
+        {
+            on = false;
+            lock (io)
+            {
+                if (connected) try { Send(1, SetActivity(null)); } catch { }
+                Close();
+            }
+        }
+
+        static Dictionary<string, object> Activity(NowPlayingInfo info, long start)
+        {
+            string t, a;
+            Lyrics.Clean(info.Title, info.Artist, info.App, out t, out a);
+            if (t == "") t = info.Title;
+            var activity = new Dictionary<string, object>
+            {
+                { "type", 0 },   // Playing (Discord has no "Using"; Listening read as if it were a music service)
+                { "details", Field(t) },
+                { "state", Field(a != "" ? "by " + a : info.App != "" ? "on " + info.App : "Dino Visualizer") },
+                { "buttons", new object[] { new Dictionary<string, object> { { "label", "Get Dino Visualizer" }, { "url", Page } } } }
+            };
+            if (info.Duration > TimeSpan.Zero)
+                activity["timestamps"] = new Dictionary<string, object> { { "start", start }, { "end", start + (long)info.Duration.TotalMilliseconds } };
+            if (!string.IsNullOrEmpty(info.Album))
+                activity["assets"] = new Dictionary<string, object> { { "large_text", Field(info.Album) } };
+            return activity;
+        }
+
+        // Discord takes 2 to 128 characters in each line.
+        static string Field(string s)
+        {
+            s = (s ?? "").Trim();
+            if (s.Length > 128) s = s.Substring(0, 127) + "…";
+            return s.Length < 2 ? s + "  " : s;
+        }
+
+        static Dictionary<string, object> SetActivity(Dictionary<string, object> activity)
+        {
+            if (activity != null && !noDisplayType)
+            {
+                activity = new Dictionary<string, object>(activity);
+                activity["status_display_type"] = 0;   // the member list says "Playing Dino Visualizer"
+            }
+            return new Dictionary<string, object>
+            {
+                { "cmd", "SET_ACTIVITY" },
+                { "args", new Dictionary<string, object> { { "pid", Process.GetCurrentProcess().Id }, { "activity", activity } } },
+                { "nonce", Guid.NewGuid().ToString() }
+            };
+        }
+
+        static void Run()
+        {
+            DateTime nextTry = DateTime.MinValue, nextSend = DateTime.MinValue;
+            while (true)
+            {
+                poke.WaitOne(TimeSpan.FromSeconds(5));
+                try
+                {
+                    if (!on)
+                    {
+                        lock (io) { if (connected) { try { Send(1, SetActivity(null)); } catch { } Close(); } }
+                        continue;
+                    }
+                    if (AppId == "") continue;
+                    if (!connected && DateTime.UtcNow >= nextTry)
+                    {
+                        nextTry = DateTime.UtcNow.AddSeconds(15);   // Discord not running: looked for again in a while
+                        if (Connect()) lock (sync) dirty = true;
+                    }
+                    if (!connected) continue;
+                    Dictionary<string, object> activity;
+                    lock (sync)
+                    {
+                        if (!dirty) continue;
+                        var wait = nextSend - DateTime.UtcNow;
+                        if (wait > TimeSpan.Zero) { ThreadPool.QueueUserWorkItem(_ => { Thread.Sleep(wait); poke.Set(); }); continue; }
+                        activity = wanted;
+                        dirty = false;
+                    }
+                    try { lock (io) Send(1, SetActivity(activity)); }
+                    catch { lock (sync) dirty = true; throw; }   // sent again once Discord's back
+                    nextSend = DateTime.UtcNow.AddSeconds(4);
+                }
+                catch { lock (io) Close(); }
+            }
+        }
+
+        // The pipe to the Discord app and the handshake with the app's ID. False if Discord isn't running or turned
+        // the ID down.
+        static bool Connect()
+        {
+            for (int i = 0; i < 10; i++)
+            {
+                var p = new System.IO.Pipes.NamedPipeClientStream(".", "discord-ipc-" + i, System.IO.Pipes.PipeDirection.InOut, System.IO.Pipes.PipeOptions.Asynchronous);
+                try { p.Connect(200); }
+                catch { p.Dispose(); continue; }
+                try
+                {
+                    lock (io)
+                    {
+                        pipe = p;
+                        Send(0, new Dictionary<string, object> { { "v", 1 }, { "client_id", AppId } });
+                    }
+                    int op;
+                    var ready = Receive(p, out op) as Dictionary<string, object>;   // READY, or a close with the reason
+                    object evt;
+                    if (op != 1 || ready == null || !ready.TryGetValue("evt", out evt) || (evt as string) != "READY") { lock (io) Close(); return false; }
+                    connected = true;
+                    var reader = new Thread(() => Read(p)) { IsBackground = true, Name = "Discord status reader" };
+                    reader.Start();
+                    if (Changed != null) Changed();
+                    return true;
+                }
+                catch { lock (io) Close(); return false; }
+            }
+            return false;
+        }
+
+        // Discord's answers (it has to be read, or its side of the pipe fills up): a ping is answered, a refusal of
+        // status_display_type means sending again without it, and a close or a broken pipe means letting go.
+        static void Read(System.IO.Pipes.NamedPipeClientStream p)
+        {
+            try
+            {
+                while (true)
+                {
+                    int op;
+                    var message = Receive(p, out op) as Dictionary<string, object>;
+                    if (op == 2) break;
+                    if (op == 3) { lock (io) Send(4, message); continue; }
+                    object evt;
+                    if (op == 1 && message != null && message.TryGetValue("evt", out evt) && (evt as string) == "ERROR" && !noDisplayType)
+                    {
+                        noDisplayType = true;
+                        lock (sync) dirty = true;
+                        poke.Set();
+                    }
+                }
+            }
+            catch { }
+            lock (io) { if (pipe == p) Close(); }
+        }
+
+        // A frame: its opcode and length (little-endian), then the JSON.
+        static void Send(int op, object message)
+        {
+            var body = System.Text.Encoding.UTF8.GetBytes(Json().Serialize(message));
+            var frame = new byte[8 + body.Length];
+            BitConverter.GetBytes(op).CopyTo(frame, 0);
+            BitConverter.GetBytes(body.Length).CopyTo(frame, 4);
+            body.CopyTo(frame, 8);
+            pipe.Write(frame, 0, frame.Length);
+            pipe.Flush();
+        }
+
+        static object Receive(Stream p, out int op)
+        {
+            var head = ReadExactly(p, 8);
+            op = BitConverter.ToInt32(head, 0);
+            int length = BitConverter.ToInt32(head, 4);
+            if (length < 0 || length > 1 << 20) throw new IOException("bad frame");
+            return Json().DeserializeObject(System.Text.Encoding.UTF8.GetString(ReadExactly(p, length)));
+        }
+
+        static byte[] ReadExactly(Stream p, int count)
+        {
+            var b = new byte[count];
+            for (int at = 0; at < count; )
+            {
+                int n = p.Read(b, at, count - at);
+                if (n <= 0) throw new IOException("closed");
+                at += n;
+            }
+            return b;
+        }
+
+        static void Close()
+        {
+            bool was = connected;
+            connected = false;
+            if (pipe != null) try { pipe.Dispose(); } catch { }
+            pipe = null;
+            if (was && Changed != null) Changed();
+        }
+    }
+
     static class VrcChatbox
     {
         public static readonly string[] Names = { "Off", "Song", "Song + Time", "Song + Progress Bar", "Song + Lyrics", "Song + Time + Lyrics", "Song + Bar + Lyrics" };
@@ -11902,9 +12371,15 @@ namespace DinoVisualizer
             wrist.WindowResized += size => Settings.Set("vrwindowsize", Math.Round(size, 2));
             wrist.Visualizer = vizStyle;
             wrist.Command += slot => { if (watcher != null) watcher.Send(slot); };
+            wrist.VolumeChanged += level => { if (watcher != null) watcher.SetVolume(level); };
+            wrist.SeekRequested += position => { if (watcher != null) watcher.Seek(position); };
+            wrist.VisualizerChanged += SetViz;
             wrist.Changed += () => { if (IsHandleCreated && !IsDisposed) BeginInvoke((Action)UpdateStatus); };
+            DiscordPresence.Changed += () => { try { if (IsHandleCreated && !IsDisposed) BeginInvoke((Action)UpdateStatus); } catch { } };
+            DiscordPresence.On = Settings.Num("discord", 0) != 0;
             wrist.Look = Clamp(Settings.Num("vrwristlook", 0), VrWrist.Looks.Length);
             wrist.ShowBatteries = Settings.Num("vrbatteries", 0) != 0;
+            wrist.NeedTrigger = Settings.Num("vrwristtrigger", 1) != 0;
             wrist.Place = Clamp(Settings.Num("vrwrist", 0), VrWrist.Names.Length);
             AutoStart.Follow();
             startInTray = AutoStart.InTray;
@@ -11970,6 +12445,7 @@ namespace DinoVisualizer
             {
                 if ((Visible && WindowState != FormWindowState.Minimized) || wrist.WindowOpen) page.Pulse();
                 VrcChatbox.Tick(current);
+                DiscordPresence.Update(current);
                 // Memory that's no longer needed goes back to Windows: once starting up has settled, then every ten
                 // minutes.
                 uiTicks++;
@@ -12196,6 +12672,12 @@ namespace DinoVisualizer
                 Label = "Chatbox Clock:", Choices = VrcChatbox.ClockNames, Current = () => VrcChatbox.ClockStyle,
                 Choose = i => { VrcChatbox.ClockStyle = i; Settings.Set("vrcclock", i); VrcChatbox.Tick(current); }
             });
+            // What's playing as the Discord status ("Playing Dino Visualizer"), through the Discord app on this computer.
+            options.Rows.Add(new OptionsPanel.Row
+            {
+                Label = "Discord Status:", Choices = DiscordPresence.Names, Current = () => DiscordPresence.On ? 1 : 0,
+                Choose = i => { DiscordPresence.On = i == 1; Settings.Set("discord", i); DiscordPresence.Update(current); UpdateStatus(); }
+            });
             // The hologram card on a wrist in SteamVR, and which of the widget's looks it has.
             options.Rows.Add(new OptionsPanel.Row
             {
@@ -12213,6 +12695,11 @@ namespace DinoVisualizer
             {
                 Label = "VR Wrist Look:", Choices = VrWrist.Looks, Current = () => wrist.Look,
                 Choose = i => { wrist.Look = i; Settings.Set("vrwristlook", i); }
+            });
+            options.Rows.Add(new OptionsPanel.Row
+            {
+                Label = "VR Wrist Shows:", Choices = VrWrist.ShowNames, Current = () => wrist.NeedTrigger ? 1 : 0,
+                Choose = i => { wrist.NeedTrigger = i == 1; Settings.Set("vrwristtrigger", i); }
             });
             options.Rows.Add(new OptionsPanel.Row
             {
@@ -12365,7 +12852,8 @@ namespace DinoVisualizer
             bool any = !string.IsNullOrEmpty(current.Title);
             top.State = !any ? "Idle" : current.Playing ? "Playing" : "Paused";
             top.Line2 = "Widget: " + (widget == null ? "Off" : StyleNames[widget.Style + 1]) + "   (Ctrl+F11 shows or hides it)" + SleepNote()
-                      + (wrist.Place == 0 ? "" : wrist.Connected ? "   ·   VR Wrist: On" : "   ·   VR Wrist: Waiting For SteamVR");
+                      + (wrist.Place == 0 ? "" : wrist.Connected ? "   ·   VR Wrist: On" : "   ·   VR Wrist: Waiting For SteamVR")
+                      + (!DiscordPresence.On ? "" : DiscordPresence.Connected ? "   ·   Discord: On" : "   ·   Discord: Waiting For Discord");
             top.Invalidate();
             widgetButton.Text = widget == null ? "Show Widget" : "Hide Widget";
             bottom.Invalidate();
@@ -12578,6 +13066,7 @@ namespace DinoVisualizer
             if (strawberry != null) strawberry.Close();
             strawberry = null;
             VrcChatbox.Stop();
+            DiscordPresence.Stop();
             wrist.Dispose();
             tray.Visible = false;
             tray.Dispose();
