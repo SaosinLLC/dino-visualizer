@@ -80,11 +80,15 @@ Spotify and Google only share your playlists with apps that have a **developer k
 3. Copy the app's **Client ID** into the window and click **Sign In**. Approve in your browser.
 
 **YouTube / YouTube Music**
+
+There's a **[step-by-step guide](YOUTUBE-SETUP.md)** for this one, with what each screen looks like and what to do if something goes wrong. In short:
+
 1. [Create a Google Cloud project](https://console.cloud.google.com/projectcreate) (any name).
 2. Turn on the [YouTube Data API v3](https://console.cloud.google.com/apis/library/youtube.googleapis.com) for it.
-3. Open [Google Auth Platform](https://console.cloud.google.com/auth/overview) and click **Get started**: app name, your email, audience **External**. Then under **Audience**, click **Publish app** so Google doesn't sign you out every 7 days (or add yourself as a test user).
-4. Under [Clients](https://console.cloud.google.com/auth/clients), create a **Desktop app** client and copy its **Client ID** and **Client secret** into the window.
-5. Click **Sign In**. Google may warn that it hasn't verified the app. It's your own app, so click **Advanced**, then **Go to Dino Visualizer**.
+3. Open [Google Auth Platform](https://console.cloud.google.com/auth/overview) and click **Get started**: app name, your email, audience **External**, your email again, agree, **Create**.
+4. Under [Audience](https://console.cloud.google.com/auth/audience), add your Google account under **Test users**. (Skip **Publish app**: Google only publishes apps that have a website and a privacy policy.)
+5. Under [Clients](https://console.cloud.google.com/auth/clients), create a **Desktop app** client. Keep the box that appears open (Google shows the secret only once) and copy its **Client ID** and **Client secret** into the window.
+6. Click **Sign In**. Google warns that it hasn't verified the app. It's your own key, so click **Continue** (or **Advanced**, then **Go to Dino Visualizer**). Google signs test users out every 7 days; when that happens, just click **Sign In** again.
 
 **How signing in works:** Dino Visualizer opens Spotify's or Google's own sign-in page in your browser, so it never sees your password. When you approve, the browser hands a one-time code back to the app on `127.0.0.1` (your own PC only). The app only asks to *read* your playlists, plus permission to start playback in Spotify. Your developer keys and sign-ins are saved encrypted for your Windows account in `%AppData%\Dino Visualizer\accounts.dat`, and **Sign Out** removes the sign-in.
 

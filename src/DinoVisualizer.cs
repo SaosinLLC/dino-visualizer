@@ -19,7 +19,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.6.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.6.1.0")]
 [assembly: System.Reflection.AssemblyTitle("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyProduct("Dino Visualizer")]
 [assembly: System.Reflection.AssemblyCompany("Saosin LLC")]
@@ -9828,6 +9828,8 @@ namespace DinoVisualizer
     // sign-in address to register), boxes to paste the key into, and Sign In. The key is saved encrypted (Vault).
     class AccountSetup : Form
     {
+        const string GuidePage = "https://github.com/SaosinLLC/dino-visualizer/blob/main/YOUTUBE-SETUP.md";
+        const string VideoPage = "";   // a video of the whole YouTube setup (none yet: the link only shows once there is)
         readonly MusicAccount account;
         readonly TextBox id, secret;
         readonly FlowLayoutPanel steps;
@@ -9846,7 +9848,7 @@ namespace DinoVisualizer
             BackColor = Theme.Bg;
             ForeColor = Theme.Primary;
             Font = Theme.Body;
-            ClientSize = new Size(Theme.S(760), Theme.S(spotify ? 600 : 720));
+            ClientSize = new Size(Theme.S(760), Theme.S(spotify ? 600 : 820));
             textWidth = ClientSize.Width - Theme.S(60);
 
             steps = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true, Dock = DockStyle.Fill, Padding = new Padding(Theme.S(24), Theme.S(18), Theme.S(12), Theme.S(12)), BackColor = Theme.Bg };
@@ -9869,19 +9871,27 @@ namespace DinoVisualizer
             else
             {
                 Note("YouTube (and YouTube Music, which shares your YouTube playlists) only shares them with apps that have a developer key " +
-                     "from Google Cloud. It's free and takes about 5 minutes, once.");
+                     "from Google Cloud. It's free and takes about 10 minutes, once.");
+                if (VideoPage != "") Link("Watch a video of the whole setup", VideoPage);
+                Link("Open the step-by-step guide (with what to do if something goes wrong)", GuidePage);
                 Step("1.  Create a Google Cloud project (any name, for example Dino Visualizer).");
                 Link("Create a project", "https://console.cloud.google.com/projectcreate");
                 Step("2.  With that project selected, turn on the YouTube Data API v3 (click Enable).");
                 Link("Open the YouTube Data API page", "https://console.cloud.google.com/apis/library/youtube.googleapis.com");
-                Step("3.  Open Google Auth Platform and click Get started: app name Dino Visualizer, your email, Audience External, then Create. " +
-                     "Then under Audience click Publish app, so Google doesn't sign you out every 7 days (or add your Google account under Test users).");
+                Step("3.  Open Google Auth Platform and click Get started: app name Dino Visualizer, your email, Audience External, " +
+                     "your email again, agree to the policy, then Create.");
                 Link("Open Google Auth Platform", "https://console.cloud.google.com/auth/overview");
-                Step("4.  Under Clients, click Create client, choose Desktop app, and Create. Copy its Client ID and Client secret here:");
+                Step("4.  Under Audience, find Test users, click Add users and add the Google account with your playlists. " +
+                     "(Skip Publish app: Google only publishes apps with a website and privacy policy.)");
+                Link("Open Audience", "https://console.cloud.google.com/auth/audience");
+                Step("5.  Under Clients, click Create client, choose Desktop app, and Create. Keep the box that appears open " +
+                     "(Google shows the secret only once) and copy its Client ID and Client secret here:");
                 Link("Open Clients", "https://console.cloud.google.com/auth/clients");
                 id = Input("Client ID", Vault.Get(account.Name + ".client"));
                 secret = Input("Client secret", Vault.Get(account.Name + ".secret"));
-                Step("5.  Click Sign In. Google may say it hasn't verified the app: it's your own app, so click Advanced, then Go to Dino Visualizer.");
+                Step("6.  Click Sign In. Google says it hasn't verified the app: it's your own key, so click Continue " +
+                     "(or Advanced, then Go to Dino Visualizer) and allow it to view your YouTube account. " +
+                     "Google signs test users out every 7 days; then just click Sign In again.");
             }
 
             var buttons = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, AutoSize = true, Margin = new Padding(0, Theme.S(14), 0, 0), BackColor = Theme.Bg };

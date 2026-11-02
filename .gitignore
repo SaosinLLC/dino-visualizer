@@ -5,3 +5,5 @@ DinoVisualizerTest.exe
 *.exe.download
 _updtest/
 _release/
+# The app's Google sign-in client (ID and secret): built into the exe, never in the code here.
+google-client.txt
